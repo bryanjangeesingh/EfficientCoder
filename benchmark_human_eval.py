@@ -32,8 +32,8 @@ def batch_generate_completions(
     model,
     tokenizer,
     batch_size: int = 4,
-    max_new_tokens: int = 512,
-    num_samples_per_task: int = 3  # New parameter for number of completions
+    max_new_tokens: int = 200,
+    num_samples_per_task: int = 20  # New parameter for number of completions
 ) -> List[List[str]]:
     """Generate multiple code completions in batches for each prompt"""
     all_completions = []
@@ -92,7 +92,7 @@ def estimate_optimal_batch_size(model) -> int:
     # Rough estimation - adjust these values based on your specific model
     memory_per_sample = 2 * 1024 * 1024 * 1024  # 2GB per sample
     max_batch_size = max(1, math.floor(gpu_memory / memory_per_sample))
-    return min(2, 8)  # Cap at 8 to avoid potential issues
+    return min(max_batch_size, 8)  # Cap at 8 to avoid potential issues
 
 def run_benchmark():
     """Run HumanEval benchmark on CodeLlama"""
@@ -161,8 +161,8 @@ def run_benchmark():
     print(f"Total problems: {len(problems)}")
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per problem: {total_time/len(problems):.2f} seconds")
-    print(f"pass@1: {pass_k[1]:.3f}")
-    print(f"pass@10: {pass_k[10]:.3f}")
+    # print(f"pass@1: {pass_k[1]:.3f}")
+    # print(f"pass@10: {pass_k[10]:.3f}")
 
 if __name__ == "__main__":
     run_benchmark()
