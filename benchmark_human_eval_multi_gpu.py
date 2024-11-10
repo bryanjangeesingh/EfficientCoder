@@ -30,7 +30,7 @@ def cleanup():
 
 def load_model_and_tokenizer(rank):
     """Load CodeLlama model and tokenizer with multi-GPU support"""
-    model_name = "codellama/CodeLlama-7b-Instruct-hf"
+    model_name = "codellama/CodeLlama-7b-Python-hf"
 
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -51,8 +51,7 @@ def load_model_and_tokenizer(rank):
 
 def generate_prompt(problem):
     """Generate prompt for the model"""
-    prompt = problem["prompt"]
-    return prompt  # Return the raw prompt without any additional formatting
+    return problem["prompt"] + "\n"  # Just return the original prompt with a newline
 
 
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
@@ -73,10 +72,10 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
                 **inputs,
                 max_new_tokens=512,
                 do_sample=False,
+                top_p=0.95,
                 num_beams=1,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                num_return_sequences=1,
             )
 
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
@@ -97,12 +96,10 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
 
 
 def extract_completion(decoded_output, prompt):
-    """Extract the completion from the decoded output"""
-    # Find where the actual completion starts
     completion = decoded_output[len(prompt) :].strip()
-    # Remove any additional prompt-like text that might have been generated
-    if "def " in completion:
-        completion = completion[: completion.rfind("def ")].strip()
+    # Remove everything after the first function definition that appears after the completion
+    if "\ndef " in completion:
+        completion = completion[: completion.index("\ndef ")].strip()
     return completion
 
 
