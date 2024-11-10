@@ -76,9 +76,8 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=1024,
                 do_sample=False,
-                temperature=0.0,  # Use greedy decoding for pass@1
                 num_beams=1,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
