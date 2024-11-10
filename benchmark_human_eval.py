@@ -7,8 +7,9 @@ from typing import List, Dict
 import math
 import sys
 import os
+import argparse
 
-# change the path below to point the human-eval directory
+# Change the path below to point to the human-eval directory
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
 from evaluation import evaluate_functional_correctness
@@ -32,66 +33,72 @@ def batch_generate_completions(
     model,
     tokenizer,
     batch_size: int = 4,
-    max_new_tokens: int = 200,
-    num_samples_per_task: int = 20,  # New parameter for number of completions
+    max_new_tokens: int = 1024,
+    num_samples_per_task: int = 1,
 ) -> List[List[str]]:
     """Generate multiple code completions in batches for each prompt"""
     all_completions = []
+    first_sample = True  # Flag to track first sample
 
-    # Initialize progress bar for batch processing
     with tqdm(
         total=len(prompts) * num_samples_per_task, desc="Generating completions"
     ) as pbar:
-        # Process prompts in batches
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i : i + batch_size]
 
-            # Tokenize batch
+            # Print first prompt
+            if first_sample:
+                print("\n=== First Prompt ===")
+                print(batch_prompts[0])
+                print("===================\n")
+
             inputs = tokenizer(
                 batch_prompts,
                 padding=True,
                 return_tensors="pt",
                 truncation=True,
-                max_length=200,
+                max_length=4096,
+                return_attention_mask=True,
             ).to(model.device)
 
-            # Generate completions
             with torch.no_grad():
                 outputs = model.generate(
-                    **inputs,
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
                     max_new_tokens=max_new_tokens,
-                    temperature=0.2,
-                    top_p=0.95,
-                    do_sample=True,
-                    pad_token_id=tokenizer.eos_token_id,
-                    num_return_sequences=num_samples_per_task,  # Generate multiple completions per input
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    num_return_sequences=num_samples_per_task,
                 )
 
-            # Decode completions
-            decoded_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            decoded_outputs = tokenizer.batch_decode(
+                outputs[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
+            )
 
-            # Process completions per prompt
+            # For the first sample, print the generation and set a breakpoint
+            if first_sample:
+                print("=== First Generation ===")
+                print(decoded_outputs[0])
+                print("======================\n")
+                breakpoint()
+                first_sample = False
+
             num_prompts = len(batch_prompts)
             for j in range(num_prompts):
                 task_completions = decoded_outputs[
                     j * num_samples_per_task : (j + 1) * num_samples_per_task
                 ]
-                all_completions.append(
-                    [
-                        output[len(batch_prompts[j]) :].strip()
-                        for output in task_completions
-                    ]
-                )
+                all_completions.append([output.strip() for output in task_completions])
 
-            # Update the progress bar
             pbar.update(num_prompts * num_samples_per_task)
 
     return all_completions
 
 
 def format_prompt(problem: Dict) -> str:
-    """Format HumanEval problem into prompt"""
-    return f"{problem['prompt']}\n"
+    """Format HumanEval problem into prompt using the format from multi-GPU script"""
+    return f"# Complete the following Python function:\n\n{problem['prompt']}"
 
 
 def estimate_optimal_batch_size(model) -> int:
@@ -100,29 +107,33 @@ def estimate_optimal_batch_size(model) -> int:
         return 1
 
     gpu_memory = torch.cuda.get_device_properties(0).total_memory
-    # Rough estimation - adjust these values based on your specific model
     memory_per_sample = 2 * 1024 * 1024 * 1024  # 2GB per sample
     max_batch_size = max(1, math.floor(gpu_memory / memory_per_sample))
-    return min(max_batch_size, 8)  # Cap at 8 to avoid potential issues
+    return min(max_batch_size, 8)
 
 
-def run_benchmark():
-    """Run HumanEval benchmark on CodeLlama"""
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="completions.jsonl",
+        help="Path to save the completions",
+    )
+    args = parser.parse_args()
+
     print("Loading model and tokenizer...")
     model, tokenizer = load_model_and_tokenizer()
 
-    # Estimate optimal batch size
     batch_size = estimate_optimal_batch_size(model)
     print(f"Using batch size: {batch_size}")
 
     print("Loading HumanEval problems...")
     problems = read_problems()
 
-    # Prepare all prompts
     prompts = [format_prompt(problem) for problem in problems.values()]
     task_ids = list(problems.keys())
 
-    num_samples_per_task = 3  # Number of completions per task
     samples = []
     start_time = time.time()
 
@@ -132,7 +143,8 @@ def run_benchmark():
         model,
         tokenizer,
         batch_size=batch_size,
-        num_samples_per_task=num_samples_per_task,
+        max_new_tokens=1024,
+        num_samples_per_task=1,
     )
 
     # Combine results
@@ -142,37 +154,32 @@ def run_benchmark():
             samples.append(sample)
 
     # Save generations
-    output_file = "codellama_completions.jsonl"
-    write_jsonl(output_file, samples)
+    write_jsonl(args.output_file, samples)
 
-    # Evaluate results
+    # Run evaluation
     print("Evaluating solutions...")
-    results = evaluate_functional_correctness(output_file)
+    results = evaluate_functional_correctness(args.output_file)
 
-    # Calculate metrics
+    # Calculate and save metrics
     total_time = time.time() - start_time
-    pass_k = results["pass@1"]
-
-    # Save results
     benchmark_results = {
         "model": "CodeLlama-7b",
         "num_problems": len(problems),
         "total_time": total_time,
-        "pass@k": pass_k,
+        "pass@1": results["pass@1"],
         "batch_size": batch_size,
         "average_time_per_problem": total_time / len(problems),
     }
 
-    with open("benchmark_results.json", "w") as f:
+    with open("results.json", "w") as f:
         json.dump(benchmark_results, f, indent=2)
 
     print("\nResults:")
     print(f"Total problems: {len(problems)}")
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per problem: {total_time/len(problems):.2f} seconds")
-    # print(f"pass@1: {pass_k[1]:.3f}")
-    # print(f"pass@10: {pass_k[10]:.3f}")
+    print(f"Pass@1: {results['pass@1']:.3f}")
 
 
 if __name__ == "__main__":
-    run_benchmark()
+    main()
