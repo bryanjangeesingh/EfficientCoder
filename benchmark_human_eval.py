@@ -28,6 +28,20 @@ def load_model_and_tokenizer():
     return model, tokenizer
 
 
+def extract_function_body(completion: str) -> str:
+    """Extract only the first function body from the generated code."""
+    # Split the output by line and keep lines until we find an empty line or another function definition.
+    lines = completion.splitlines()
+    function_body = []
+    for line in lines:
+        # Stop if another function definition is detected
+        if line.strip().startswith("def "):
+            break
+        function_body.append(line)
+
+    return "\n".join(function_body).strip()
+
+
 def batch_generate_completions(
     prompts: List[str],
     model,
@@ -70,11 +84,11 @@ def batch_generate_completions(
             )
 
             for decoded_output in decoded_outputs:
-                # Ensure the completion is properly indented
+                # Ensure the completion is properly indented and extract the function body
                 indented_output = "\n".join(
                     [
                         "    " + line if line else ""
-                        for line in decoded_output.splitlines()
+                        for line in extract_function_body(decoded_output).splitlines()
                     ]
                 ).strip()
 
@@ -88,8 +102,9 @@ def batch_generate_completions(
 
 
 def format_prompt(problem: Dict) -> str:
-    """Return the problem prompt that matches the function signature only."""
-    return problem["prompt"]
+    """Return a clean prompt that only includes the function signature."""
+    prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+    return prompt
 
 
 def estimate_optimal_batch_size(model) -> int:
