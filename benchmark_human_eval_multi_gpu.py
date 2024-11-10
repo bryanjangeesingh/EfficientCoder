@@ -34,10 +34,19 @@ class CodeLlamaEvaluator:
         )
         self.tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
+        # Set pad token to eos token if not set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
     def generate_completion(self, prompt: str, max_new_tokens: int = 512) -> str:
         """Generate code completion for a given prompt."""
         inputs = self.tokenizer(
-            prompt, return_tensors="pt", padding=True, return_attention_mask=True
+            prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=4096,  # Add max length to prevent potential issues
+            return_attention_mask=True,
         ).to(self.device)
 
         with torch.no_grad():
@@ -46,7 +55,8 @@ class CodeLlamaEvaluator:
                 attention_mask=inputs.attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,  # Deterministic for pass@1
-                pad_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
                 num_return_sequences=1,
             )
 
@@ -55,24 +65,34 @@ class CodeLlamaEvaluator:
         )
         return completion.strip()
 
-    def process_problems(self, problems):
+    def process_problems(self, problems: List[Dict]) -> List[Dict]:
         """Process a batch of HumanEval problems."""
         completions = []
 
         for problem in tqdm(problems, desc=f"Processing on GPU {self.device}"):
             prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
-            completion = self.generate_completion(prompt)
-            completions.append(
-                {"task_id": problem["task_id"], "completion": completion}
-            )
+            try:
+                completion = self.generate_completion(prompt)
+                completions.append(
+                    {"task_id": problem["task_id"], "completion": completion}
+                )
+            except Exception as e:
+                logger.error(f"Error processing task {problem['task_id']}: {str(e)}")
+                completions.append(
+                    {
+                        "task_id": problem["task_id"],
+                        "completion": "",  # Empty completion on error
+                    }
+                )
 
         return completions
 
 
-def distribute_problems(problems, n_gpus: int):
+def distribute_problems(problems: Dict, n_gpus: int) -> List[List[Dict]]:
     """Distribute problems evenly across GPUs."""
     problems_list = list(problems.values())
-    return np.array_split(problems_list, n_gpus)
+    chunks = np.array_split(problems_list, n_gpus)
+    return [chunk.tolist() for chunk in chunks]  # Convert numpy arrays back to lists
 
 
 def main():
@@ -104,11 +124,15 @@ def main():
     # Create evaluators and process problems
     all_completions = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
-        evaluator = CodeLlamaEvaluator(gpu_id)
-        completions = evaluator.process_problems(problem_chunk)
-        all_completions.extend(completions)
-        del evaluator  # Free up GPU memory
-        torch.cuda.empty_cache()
+        try:
+            evaluator = CodeLlamaEvaluator(gpu_id)
+            completions = evaluator.process_problems(problem_chunk)
+            all_completions.extend(completions)
+            del evaluator  # Free up GPU memory
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.error(f"Error on GPU {gpu_id}: {str(e)}")
+            continue
 
     # Save completions
     write_jsonl(args.output_file, all_completions)
