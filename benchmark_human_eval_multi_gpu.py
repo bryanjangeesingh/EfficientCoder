@@ -48,6 +48,13 @@ def load_model_and_tokenizer(rank):
     return model, tokenizer
 
 
+def generate_prompt(problem):
+    """Generate prompt for the model"""
+    return f"""# Here's a Python function that {problem['description']}
+{problem['prompt']}
+"""
+
+
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
     """Generate completions on a specific GPU"""
     setup(rank, world_size)
@@ -72,7 +79,7 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
             )
 
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
-        completion = decoded_output[len(prompt) :].strip()
+        completion = decoded_output[len(prompt):].strip()
 
         samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
 
@@ -131,7 +138,7 @@ def run_multi_gpu_benchmark():
     for rank in range(world_size):
         p = mp.Process(
             target=generate_on_gpu,
-            args=(rank, world_size, problem_chunks[rank], 200, progress_queue),
+            args=(rank, world_size, problem_chunks[rank], progress_queue),
         )
         p.start()
         processes.append(p)
@@ -172,7 +179,7 @@ def run_multi_gpu_benchmark():
         "num_gpus": world_size,
         "total_time": total_time,
         "pass@k": pass_k,
-        "samples_per_task": 200,
+        "samples_per_task": 1,
         "average_time_per_problem": total_time / len(problems),
     }
 
@@ -184,6 +191,7 @@ def run_multi_gpu_benchmark():
     print(f"Number of GPUs used: {world_size}")
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per problem: {total_time/len(problems):.2f} seconds")
+    print(f"Pass@1: {pass_k:.2%}")
 
 
 if __name__ == "__main__":
