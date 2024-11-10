@@ -30,7 +30,7 @@ def cleanup():
 
 def load_model_and_tokenizer(rank):
     """Load CodeLlama model and tokenizer with multi-GPU support"""
-    model_name = "codellama/CodeLlama-7b-hf"
+    model_name = "codellama/CodeLlama-7b-Instruct-hf"
 
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -50,7 +50,10 @@ def load_model_and_tokenizer(rank):
 
 def generate_prompt(problem):
     """Generate prompt for the model"""
-    return problem["prompt"]
+    prompt = problem["prompt"]
+    # Remove any trailing whitespace or newlines
+    prompt = prompt.strip()
+    return f"[INST] Complete the following Python code:\n\n{prompt}\n[/INST]"
 
 
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
@@ -63,14 +66,16 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
         prompt = generate_prompt(problem)
 
         inputs = tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=512
+            prompt, return_tensors="pt", truncation=True, max_length=512, padding=True
         ).to(model.device)
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=200,
-                do_sample=False,  # Greedy decoding for pass@1
+                max_new_tokens=512,  # Increase from 200
+                do_sample=False,  # Use greedy decoding for single sample
+                temperature=0.2,  # Only needed if do_sample=True
+                top_p=0.95,  # Only needed if do_sample=True
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
                 num_return_sequences=1,
