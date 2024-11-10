@@ -107,7 +107,6 @@ def batch_generate_completions(
 
                 all_completions.append([remove_placeholder_comment(indented_output)])
 
-            breakpoint()
             pbar.update(len(batch_prompts) * num_samples_per_task)
 
     return all_completions
