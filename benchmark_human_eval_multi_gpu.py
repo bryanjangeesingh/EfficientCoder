@@ -24,27 +24,6 @@ def setup_gpu_process(rank):
     torch.cuda.set_device(rank)
 
 
-def clean_completion(completion: str) -> str:
-    # Remove any leading/trailing whitespace
-    completion = completion.strip()
-
-    # Ensure we start with the function definition
-    if not completion.startswith("def"):
-        parts = completion.split("def", 1)
-        if len(parts) > 1:
-            completion = "def" + parts[1]
-
-    # Remove any trailing docstrings or comments
-    lines = completion.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        if line.strip().startswith('"""') or line.strip().startswith("'''"):
-            break
-        cleaned_lines.append(line)
-
-    return "\n".join(cleaned_lines)
-
-
 def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     """Evaluate problems on a specific GPU."""
     setup_gpu_process(gpu_id)
@@ -55,18 +34,8 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
         "codellama/CodeLlama-7b-hf",
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
-        trust_remote_code=True,
-        use_cache=True,
     )
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        "codellama/CodeLlama-7b-hf",
-        padding_side="left",
-        truncation_side="left",
-        use_fast=True,
-    )
-
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -74,12 +43,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Fix the prompt formatting
-        prompt = f"""# Complete the following Python function according to the docstring specification:
-
-        {problem['prompt']}
-
-        # Your solution:
-        def"""
+        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
 
         try:
             inputs = tokenizer(
@@ -95,22 +59,16 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
                 outputs = model.generate(
                     input_ids=inputs.input_ids,
                     attention_mask=inputs.attention_mask,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    temperature=0.0,  # Add this
-                    top_p=1.0,  # Add this
-                    top_k=50,  # Add this
-                    num_beams=1,  # Add this
+                    max_new_tokens=1024,
+                    do_sample=False,  # Ensure deterministic output
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                     num_return_sequences=1,
                 )
 
-            completion = clean_completion(
-                tokenizer.decode(
-                    outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-                ).strip()
-            )
+            completion = tokenizer.decode(
+                outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+            ).strip()
 
             completions.append(
                 {"task_id": problem["task_id"], "completion": completion}
