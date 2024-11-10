@@ -1,6 +1,5 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from concurrent.futures import ProcessPoolExecutor
 import json
 import os
@@ -13,11 +12,9 @@ import numpy as np
 from typing import List, Dict
 from filelock import FileLock
 
-
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
 from evaluation import evaluate_functional_correctness
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,9 +25,7 @@ def setup_gpu_process(rank):
     torch.cuda.set_device(rank)
 
 
-def evaluate_on_gpu(
-    gpu_id: int, problems: List[Dict], output_file: str, lock: FileLock
-):
+def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     """Evaluate problems on a specific GPU."""
     setup_gpu_process(gpu_id)
     logger.info(f"Starting evaluation on GPU {gpu_id}")
@@ -84,7 +79,8 @@ def evaluate_on_gpu(
             )
             completions.append({"task_id": problem["task_id"], "completion": ""})
 
-    # Save completions with lock to prevent file conflicts
+    # Create a file lock here, inside the process
+    lock = FileLock(f"{output_file}.lock")
     with lock:
         if os.path.exists(output_file):
             with open(output_file, "r") as f:
@@ -132,14 +128,16 @@ def main():
     # Initialize multiprocessing method
     mp.set_start_method("spawn", force=True)
 
-    # Create a file lock for safe writing
-    lock = FileLock(f"{args.output_file}.lock")
-
     # Create and start processes
     processes = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
         p = mp.Process(
-            target=evaluate_on_gpu, args=(gpu_id, problem_chunk, args.output_file, lock)
+            target=evaluate_on_gpu,
+            args=(
+                gpu_id,
+                problem_chunk,
+                args.output_file,
+            ),  # Removed lock from arguments
         )
         p.start()
         processes.append(p)
