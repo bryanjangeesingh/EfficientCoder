@@ -18,7 +18,6 @@ from evaluation import evaluate_functional_correctness
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 def setup_gpu_process(rank):
     """Set up process-specific GPU settings."""
     torch.cuda.set_device(rank)
