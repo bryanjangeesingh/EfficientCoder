@@ -37,28 +37,38 @@ def load_model_and_tokenizer(rank):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model with specific GPU assignment
-    device = torch.device(f"cuda:{rank}")
+    # Load model without device_map
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python/",
         torch_dtype=torch.float16,
-        device_map={"": rank},  # Assign to specific GPU
         trust_remote_code=True,
     )
+
+    # Move model to the specific GPU
+    device = torch.device(f"cuda:{rank}")
+    model.to(device)
+
+    # Optionally wrap in DDP if needed
+    # model = DDP(model, device_ids=[rank], output_device=rank)
 
     return model, tokenizer
 
 
 def generate_prompt(problem):
     """Generate prompt for the model"""
-    return problem["prompt"] + "\n"  # Just return the original prompt with a newline
+    prompt = problem["prompt"]
+    # Ensure the prompt ends with the function signature
+    if not prompt.strip().endswith(":"):
+        prompt += "\n"  # Ensure there's a newline
+    return prompt
 
 
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
     """Generate completions on a specific GPU"""
     setup(rank, world_size)
     model, tokenizer = load_model_and_tokenizer(rank)
+    device = torch.device(f"cuda:{rank}")
     samples = []
 
     for task_id, problem in problems_chunk:
@@ -68,23 +78,31 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=1024,  # Increase max_length
+            max_length=1024,
             padding=True,
             add_special_tokens=True,
-        ).to(model.device)
+        ).to(device)
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=1024,
-                do_sample=False,
-                num_beams=1,
+                do_sample=True,
+                temperature=0.2,
+                top_p=0.95,
+                num_return_sequences=1,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-        decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
         completion = extract_completion(decoded_output, prompt)
+
+        import pdb
+
+        pdb.set_trace()
+        print(f"Prompt:\n{prompt}")
+        print(f"Completion:\n{completion}")
 
         samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
 
@@ -101,15 +119,8 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
 
 
 def extract_completion(decoded_output, prompt):
+    """Extract the completion from the model's output"""
     completion = decoded_output[len(prompt) :].strip()
-    # Only cut at function definitions that aren't part of the solution
-    if "\ndef " in completion:
-        # Find the first function definition that isn't indented
-        lines = completion.split("\n")
-        for i, line in enumerate(lines):
-            if line.startswith("def ") and i > 0:
-                completion = "\n".join(lines[:i]).strip()
-                break
     return completion
 
 
