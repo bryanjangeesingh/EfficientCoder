@@ -38,19 +38,12 @@ def batch_generate_completions(
 ) -> List[List[str]]:
     """Generate multiple code completions in batches for each prompt"""
     all_completions = []
-    first_sample = True  # Flag to track first sample
 
     with tqdm(
         total=len(prompts) * num_samples_per_task, desc="Generating completions"
     ) as pbar:
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i : i + batch_size]
-
-            # Print first prompt
-            if first_sample:
-                print("\n=== First Prompt ===")
-                print(batch_prompts[0])
-                print("===================\n")
 
             inputs = tokenizer(
                 batch_prompts,
@@ -77,12 +70,7 @@ def batch_generate_completions(
             )
 
             # For the first sample, print the generation and set a breakpoint
-            if first_sample:
-                print("=== First Generation ===")
-                print(decoded_outputs[0])
-                print("======================\n")
-                breakpoint()
-                first_sample = False
+            breakpoint()
 
             num_prompts = len(batch_prompts)
             for j in range(num_prompts):
