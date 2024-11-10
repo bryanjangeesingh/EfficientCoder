@@ -48,22 +48,26 @@ def load_model_and_tokenizer(rank):
     return model, tokenizer
 
 
-def generate_on_gpu(rank, world_size, problems_chunk, num_samples_per_task=200):
+def generate_on_gpu(
+    rank, world_size, problems_chunk, num_samples_per_task=200, progress_queue=None
+):
     """Generate completions on a specific GPU"""
     setup(rank, world_size)
 
     model, tokenizer = load_model_and_tokenizer(rank)
     samples = []
 
-    for task_id, problem in problems_chunk:
+    total_problems = len(problems_chunk)
+
+    for i, (task_id, problem) in enumerate(problems_chunk):
         prompt = f"{problem['prompt']}\n"
 
         # Process in smaller chunks to manage memory
         chunk_size = 20
         completions = []
 
-        for i in range(0, num_samples_per_task, chunk_size):
-            current_chunk_size = min(chunk_size, num_samples_per_task - i)
+        for j in range(0, num_samples_per_task, chunk_size):
+            current_chunk_size = min(chunk_size, num_samples_per_task - j)
 
             inputs = tokenizer(
                 prompt, return_tensors="pt", truncation=True, max_length=200
@@ -99,6 +103,10 @@ def generate_on_gpu(rank, world_size, problems_chunk, num_samples_per_task=200):
             for sample in samples:
                 f.write(json.dumps(sample) + "\n")
 
+        # Update progress
+        if progress_queue is not None:
+            progress_queue.put(1)
+
     cleanup()
     return samples
 
@@ -122,15 +130,41 @@ def run_multi_gpu_benchmark():
         for i in range(0, len(problems_list), chunk_size)
     ]
 
+    # Create progress queue and progress bar
+    progress_queue = mp.Queue()
+    total_problems = len(problems)
+
+    # Create and start progress monitoring process
+    def monitor_progress():
+        pbar = tqdm(total=total_problems, desc="Overall Progress")
+        completed = 0
+        while completed < total_problems:
+            items = progress_queue.get()
+            completed += items
+            pbar.update(items)
+        pbar.close()
+
+    progress_process = mp.Process(target=monitor_progress)
+    progress_process.start()
+
     start_time = time.time()
 
     # Start parallel processing
-    mp.spawn(
-        generate_on_gpu,
-        args=(world_size, problem_chunks[0], 200),  # 200 samples per task
-        nprocs=world_size,
-        join=True,
-    )
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(
+            target=generate_on_gpu,
+            args=(rank, world_size, problem_chunks[rank], 200, progress_queue),
+        )
+        p.start()
+        processes.append(p)
+
+    # Wait for all processes to complete
+    for p in processes:
+        p.join()
+
+    # Wait for progress bar to finish
+    progress_process.join()
 
     # Combine results from all GPUs
     all_samples = []
@@ -147,7 +181,7 @@ def run_multi_gpu_benchmark():
     write_jsonl(output_file, all_samples)
 
     # Evaluate results
-    print("Evaluating solutions...")
+    print("\nEvaluating solutions...")
     results = evaluate_functional_correctness(output_file)
 
     # Calculate metrics
