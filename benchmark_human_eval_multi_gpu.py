@@ -11,6 +11,8 @@ import argparse
 import sys
 import numpy as np
 from typing import List, Dict
+from filelock import FileLock
+
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
