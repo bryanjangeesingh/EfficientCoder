@@ -48,12 +48,10 @@ def extract_function_body(completion: str) -> str:
     return "\n".join(lines).strip()
 
 
-def clean_completion(completion: str) -> str:
-    """Clean up the generated completion to remove unnecessary comments."""
+def remove_placeholder_comment(completion: str) -> str:
+    """Removes the line '# Your code here\\n' from the given string."""
     lines = completion.splitlines()
-    cleaned_lines = [
-        line for line in lines if not line.strip().startswith("# Your code here")
-    ]
+    cleaned_lines = [line for line in lines if line.strip() != "# Your code here"]
     return "\n".join(cleaned_lines).strip()
 
 
@@ -107,7 +105,7 @@ def batch_generate_completions(
                     ]
                 ).strip()
 
-                all_completions.append([clean_completion(indented_output)])
+                all_completions.append([remove_placeholder_comment(indented_output)])
 
             breakpoint()
             pbar.update(len(batch_prompts) * num_samples_per_task)
