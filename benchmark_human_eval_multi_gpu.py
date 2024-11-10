@@ -1,220 +1,121 @@
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from concurrent.futures import ProcessPoolExecutor
 import json
-import time
-from tqdm import tqdm
-from typing import List, Dict
-import math
-import sys
 import os
+from tqdm import tqdm
 import torch.multiprocessing as mp
+import logging
+import argparse
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
 from evaluation import evaluate_functional_correctness
 
 
-def setup(rank, world_size):
-    """Initialize distributed training"""
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def cleanup():
-    """Clean up distributed training"""
-    dist.destroy_process_group()
-
-
-def load_model_and_tokenizer(rank):
-    """Load CodeLlama model and tokenizer with multi-GPU support"""
-    model_name = "codellama/CodeLlama-7b-Python-hf"
-
-    # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Load model without device_map
+def setup_model(gpu_id):
+    """Initialize Code Llama model on specified GPU."""
+    device = f"cuda:{gpu_id}"
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python/",
+        "codellama/CodeLlama-7b-hf",
         torch_dtype=torch.float16,
-        trust_remote_code=True,
+        device_map=device,
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights-7b-hf",
     )
-
-    # Move model to the specific GPU
-    device = torch.device(f"cuda:{rank}")
-    model.to(device)
-
-    # Optionally wrap in DDP if needed
-    # model = DDP(model, device_ids=[rank], output_device=rank)
-
-    return model, tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
+    return model, tokenizer, device
 
 
-def generate_prompt(problem):
-    """Generate prompt for the model"""
-    prompt = problem["prompt"]
-    # Ensure the prompt ends with the function signature
-    if not prompt.strip().endswith(":"):
-        prompt += "\n"  # Ensure there's a newline
-    return prompt
+def generate_completion(prompt, model, tokenizer, device, max_new_tokens=512):
+    """Generate code completion for a given prompt."""
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            inputs.input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=0.0,  # Deterministic for pass@1
+            pad_token_id=tokenizer.eos_token_id,
+            num_return_sequences=1,
+        )
+
+    completion = tokenizer.decode(
+        outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+    )
+    return completion.strip()
 
 
-def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
-    """Generate completions on a specific GPU"""
-    setup(rank, world_size)
-    model, tokenizer = load_model_and_tokenizer(rank)
-    device = torch.device(f"cuda:{rank}")
-    samples = []
+def process_problem(args):
+    """Process a single HumanEval problem."""
+    problem, gpu_id = args
+    model, tokenizer, device = setup_model(gpu_id)
 
-    for task_id, problem in problems_chunk:
-        prompt = generate_prompt(problem)
+    # Construct prompt
+    prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
 
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024,
-            padding=True,
-            add_special_tokens=True,
-        ).to(device)
+    # Generate completion
+    completion = generate_completion(prompt, model, tokenizer, device)
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=1024,
-                do_sample=True,
-                temperature=0.2,
-                top_p=0.95,
-                num_return_sequences=1,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        completion = extract_completion(decoded_output, prompt)
-        samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
-
-        if progress_queue is not None:
-            progress_queue.put(1)
-
-        # Save intermediate results
-        with open(f"completions_gpu_{rank}.jsonl", "w") as f:
-            for sample in samples:
-                f.write(json.dumps(sample) + "\n")
-
-    cleanup()
-    return samples
+    return {"task_id": problem["task_id"], "completion": completion}
 
 
-def extract_completion(decoded_output, prompt):
-    """Extract the completion from the model's output"""
-    completion = decoded_output[len(prompt) :].strip()
-    return completion
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default="0,1,2,3",
+        help="Comma-separated list of GPU IDs to use",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="completions.jsonl",
+        help="Path to save the completions",
+    )
+    args = parser.parse_args()
 
+    # Set up GPU IDs
+    gpu_ids = [int(x) for x in args.gpu_ids.split(",")]
+    n_gpus = len(gpu_ids)
 
-def run_multi_gpu_benchmark():
-    """Run HumanEval benchmark using multiple GPUs"""
-    print("Starting multi-GPU benchmark...")
-
-    # Get number of available GPUs
-    world_size = torch.cuda.device_count()
-    print(f"Using {world_size} GPUs")
-
-    # Load problems
+    # Load HumanEval problems
     problems = read_problems()
 
-    # Split problems across GPUs
-    problems_list = list(problems.items())
-    chunk_size = math.ceil(len(problems_list) / world_size)
-    problem_chunks = [
-        problems_list[i : i + chunk_size]
-        for i in range(0, len(problems_list), chunk_size)
+    # Distribute problems across GPUs
+    problem_gpu_pairs = [
+        (prob, gpu_ids[i % n_gpus]) for i, prob in enumerate(problems.values())
     ]
 
-    # Create progress queue and progress bar
-    progress_queue = mp.Queue()
-    total_problems = len(problems)
+    # Set up multiprocessing
+    mp.set_start_method("spawn", force=True)
 
-    # Create and start progress monitoring process
-    def monitor_progress():
-        pbar = tqdm(total=total_problems, desc="Overall Progress")
-        completed = 0
-        while completed < total_problems:
-            items = progress_queue.get()
-            completed += items
-            pbar.update(items)
-        pbar.close()
-
-    progress_process = mp.Process(target=monitor_progress)
-    progress_process.start()
-
-    start_time = time.time()
-
-    # Start parallel processing
-    processes = []
-    for rank in range(world_size):
-        p = mp.Process(
-            target=generate_on_gpu,
-            args=(rank, world_size, problem_chunks[rank], progress_queue),
+    # Process problems in parallel
+    logger.info(f"Starting evaluation on {n_gpus} GPUs...")
+    with ProcessPoolExecutor(max_workers=n_gpus) as executor:
+        completions = list(
+            tqdm(
+                executor.map(process_problem, problem_gpu_pairs),
+                total=len(problem_gpu_pairs),
+            )
         )
-        p.start()
-        processes.append(p)
 
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
+    # Save completions
+    write_jsonl(args.output_file, completions)
 
-    # Wait for progress bar to finish
-    progress_process.join()
+    # Evaluate pass@1
+    results = evaluate_functional_correctness(args.output_file)
 
-    # Combine results from all GPUs
-    all_samples = []
-    for rank in range(world_size):
-        filename = f"completions_gpu_{rank}.jsonl"
-        if os.path.exists(filename):
-            with open(filename, "r") as f:
-                for line in f:
-                    all_samples.append(json.loads(line))
-            os.remove(filename)  # Clean up intermediate files
-
-    # Save final results
-    output_file = "codellama_completions.jsonl"
-    write_jsonl(output_file, all_samples)
-
-    # Evaluate results
-    print("\nEvaluating solutions...")
-    results = evaluate_functional_correctness(output_file)
-
-    # Calculate metrics
-    total_time = time.time() - start_time
-    pass_k = results["pass@1"]
-
-    # Save benchmark results
-    benchmark_results = {
-        "model": "CodeLlama-7b",
-        "num_problems": len(problems),
-        "num_gpus": world_size,
-        "total_time": total_time,
-        "pass@k": pass_k,
-        "samples_per_task": 1,
-        "average_time_per_problem": total_time / len(problems),
-    }
-
-    with open("benchmark_results.json", "w") as f:
-        json.dump(benchmark_results, f, indent=2)
-
-    print("\nResults:")
-    print(f"Total problems: {len(problems)}")
-    print(f"Number of GPUs used: {world_size}")
-    print(f"Total time: {total_time:.2f} seconds")
-    print(f"Average time per problem: {total_time/len(problems):.2f} seconds")
-    print(f"Pass@1: {pass_k:.2%}")
+    # Print and save results
+    logger.info(f"Pass@1: {results['pass@1']:.3f}")
+    with open("results.json", "w") as f:
+        json.dump(results, f, indent=2)
 
 
 if __name__ == "__main__":
-    run_multi_gpu_benchmark()
+    main()
