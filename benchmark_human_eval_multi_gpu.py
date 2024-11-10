@@ -41,6 +41,7 @@ def load_model_and_tokenizer(rank):
     device = torch.device(f"cuda:{rank}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights/",
         torch_dtype=torch.float16,
         device_map={"": rank},  # Assign to specific GPU
     )
@@ -51,9 +52,7 @@ def load_model_and_tokenizer(rank):
 def generate_prompt(problem):
     """Generate prompt for the model"""
     prompt = problem["prompt"]
-    # Remove any trailing whitespace or newlines
-    prompt = prompt.strip()
-    return f"[INST] Complete the following Python code:\n\n{prompt}\n[/INST]"
+    return prompt  # Return the raw prompt without any additional formatting
 
 
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
@@ -72,17 +71,16 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,  # Increase from 200
-                do_sample=False,  # Use greedy decoding for single sample
-                temperature=0.2,  # Only needed if do_sample=True
-                top_p=0.95,  # Only needed if do_sample=True
+                max_new_tokens=512,
+                do_sample=False,
+                num_beams=1,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
                 num_return_sequences=1,
             )
 
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
-        completion = decoded_output[len(prompt) :].strip()
+        completion = extract_completion(decoded_output, prompt)
 
         samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
 
@@ -96,6 +94,16 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
 
     cleanup()
     return samples
+
+
+def extract_completion(decoded_output, prompt):
+    """Extract the completion from the decoded output"""
+    # Find where the actual completion starts
+    completion = decoded_output[len(prompt) :].strip()
+    # Remove any additional prompt-like text that might have been generated
+    if "def " in completion:
+        completion = completion[: completion.rfind("def ")].strip()
+    return completion
 
 
 def run_multi_gpu_benchmark():
