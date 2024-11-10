@@ -14,7 +14,7 @@ from filelock import FileLock
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
-from evaluation import evaluate_functional_correctness
+from evaluation_modified import evaluate_functional_correctness
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -132,12 +132,7 @@ def main():
     processes = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
         p = mp.Process(
-            target=evaluate_on_gpu,
-            args=(
-                gpu_id,
-                problem_chunk,
-                args.output_file,
-            ),  # Removed lock from arguments
+            target=evaluate_on_gpu, args=(gpu_id, problem_chunk, args.output_file)
         )
         p.start()
         processes.append(p)
