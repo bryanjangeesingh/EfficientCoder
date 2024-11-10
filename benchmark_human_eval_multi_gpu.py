@@ -53,7 +53,7 @@ class CodeLlamaEvaluator:
         )
         return completion.strip()
 
-    def process_problems(self, problems: List[Dict]) -> List[Dict]:
+    def process_problems(self, problems):
         """Process a batch of HumanEval problems."""
         completions = []
 
@@ -67,7 +67,7 @@ class CodeLlamaEvaluator:
         return completions
 
 
-def distribute_problems(problems: Dict, n_gpus: int) -> List[List[Dict]]:
+def distribute_problems(problems, n_gpus: int):
     """Distribute problems evenly across GPUs."""
     problems_list = list(problems.values())
     return np.array_split(problems_list, n_gpus)
