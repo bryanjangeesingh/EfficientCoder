@@ -97,13 +97,6 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
 
         decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
         completion = extract_completion(decoded_output, prompt)
-
-        import pdb
-
-        pdb.set_trace()
-        print(f"Prompt:\n{prompt}")
-        print(f"Completion:\n{completion}")
-
         samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
 
         if progress_queue is not None:
