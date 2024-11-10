@@ -41,7 +41,7 @@ def load_model_and_tokenizer(rank):
     device = torch.device(f"cuda:{rank}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights/",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python/",
         torch_dtype=torch.float16,
         device_map={"": rank},  # Assign to specific GPU
     )
