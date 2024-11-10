@@ -29,16 +29,18 @@ def load_model_and_tokenizer():
 
 
 def extract_function_body(completion: str) -> str:
-    """Extract only the first function body from the generated code."""
-    # Split the output by line and keep lines until we find an empty line or another function definition.
+    """Extract only the body of the function from the generated code."""
     lines = completion.splitlines()
     function_body = []
     for line in lines:
-        # Stop if another function definition is detected
-        if line.strip().startswith("def "):
+        # Stop if we encounter a line that starts with `if __name__ == "__main__"` or another function definition
+        if line.strip().startswith(
+            "if __name__ == '__main__'"
+        ) or line.strip().startswith("def "):
             break
         function_body.append(line)
 
+    # Join the extracted lines and strip trailing/leading whitespace
     return "\n".join(function_body).strip()
 
 
