@@ -36,7 +36,7 @@ def batch_generate_completions(
     max_new_tokens: int = 1024,
     num_samples_per_task: int = 1,
 ) -> List[List[str]]:
-    """Generate multiple code completions in batches for each prompt"""
+    """Generate multiple code completions in batches for each prompt."""
     all_completions = []
 
     with tqdm(
@@ -69,24 +69,25 @@ def batch_generate_completions(
                 outputs[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
             )
 
-            # For the first sample, print the generation and set a breakpoint
-            breakpoint()
+            for decoded_output in decoded_outputs:
+                # Ensure the completion is properly indented
+                indented_output = "\n".join(
+                    [
+                        "    " + line if line else ""
+                        for line in decoded_output.splitlines()
+                    ]
+                ).strip()
 
-            num_prompts = len(batch_prompts)
-            for j in range(num_prompts):
-                task_completions = decoded_outputs[
-                    j * num_samples_per_task : (j + 1) * num_samples_per_task
-                ]
-                all_completions.append([output.strip() for output in task_completions])
+                all_completions.append([indented_output])
 
-            pbar.update(num_prompts * num_samples_per_task)
+            pbar.update(len(batch_prompts) * num_samples_per_task)
 
     return all_completions
 
 
 def format_prompt(problem: Dict) -> str:
-    """Format HumanEval problem into prompt using the format from multi-GPU script"""
-    return f"# Complete the following Python function:\n\n{problem['prompt']}"
+    """Return the problem prompt that matches the function signature only."""
+    return problem["prompt"]
 
 
 def estimate_optimal_batch_size(model) -> int:
@@ -98,6 +99,11 @@ def estimate_optimal_batch_size(model) -> int:
     memory_per_sample = 2 * 1024 * 1024 * 1024  # 2GB per sample
     max_batch_size = max(1, math.floor(gpu_memory / memory_per_sample))
     return min(max_batch_size, 8)
+
+
+def clean_completion(completion: str) -> str:
+    """Clean up and format the generated completion."""
+    return "\n".join(line.rstrip() for line in completion.splitlines()).strip()
 
 
 def main():
@@ -138,7 +144,7 @@ def main():
     # Combine results
     for task_id, completions in zip(task_ids, completions_per_task):
         for completion in completions:
-            sample = {"task_id": task_id, "completion": completion}
+            sample = {"task_id": task_id, "completion": clean_completion(completion)}
             samples.append(sample)
 
     # Save generations
