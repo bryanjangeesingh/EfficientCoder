@@ -1,6 +1,5 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 from tqdm import tqdm
@@ -14,7 +13,7 @@ from filelock import FileLock
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
-from evaluation_modified import evaluate_functional_correctness
+from evaluation import evaluate_functional_correctness
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
 
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
-        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+        prompt = problem["prompt"]  # Use only the provided prompt directly
         try:
             inputs = tokenizer(
                 prompt,
@@ -83,11 +82,26 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     lock = FileLock(f"{output_file}.lock")
     with lock:
         if os.path.exists(output_file):
-            with open(output_file, "r") as f:
-                existing_completions = [json.loads(line) for line in f]
-            completions.extend(existing_completions)
+            # Read existing completions
+            try:
+                with open(output_file, "r") as f:
+                    existing_completions = [json.loads(line) for line in f]
+            except:
+                existing_completions = []
 
-        write_jsonl(output_file, completions)
+            # Add new completions
+            all_completions = existing_completions + completions
+
+            # Create a dictionary to keep only the latest completion for each task_id
+            completion_dict = {c["task_id"]: c for c in all_completions}
+
+            # Convert back to list
+            final_completions = list(completion_dict.values())
+        else:
+            final_completions = completions
+
+        # Write completions
+        write_jsonl(output_file, final_completions)
 
     # Clean up
     del model
@@ -141,14 +155,32 @@ def main():
     for p in processes:
         p.join()
 
-    # Evaluate final results
-    logger.info("All GPUs finished processing. Evaluating results...")
-    results = evaluate_functional_correctness(args.output_file)
+    # Run evaluation in a separate process to avoid any multiprocessing issues
+    logger.info("All GPUs finished processing. Running test suites...")
 
-    # Print and save results
-    logger.info(f"Pass@1: {results['pass@1']:.3f}")
-    with open("results.json", "w") as f:
-        json.dump(results, f, indent=2)
+    # Create a temporary script to run evaluation
+    eval_script = """
+import sys
+sys.path.append("/home/brytech/human-eval/human_eval")
+from evaluation import evaluate_functional_correctness
+import json
+
+results = evaluate_functional_correctness("{}")
+with open("results.json", "w") as f:
+    json.dump(results, f, indent=2)
+print(f"Pass@1: {results['pass@1']:.3f}")
+""".format(
+        args.output_file
+    )
+
+    with open("run_eval.py", "w") as f:
+        f.write(eval_script)
+
+    # Run evaluation script
+    os.system(f"{sys.executable} run_eval.py")
+
+    # Clean up
+    os.remove("run_eval.py")
 
 
 if __name__ == "__main__":
