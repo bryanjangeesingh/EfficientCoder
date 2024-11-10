@@ -44,6 +44,7 @@ def load_model_and_tokenizer(rank):
         cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python/",
         torch_dtype=torch.float16,
         device_map={"": rank},  # Assign to specific GPU
+        trust_remote_code=True,
     )
 
     return model, tokenizer
@@ -64,7 +65,12 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
         prompt = generate_prompt(problem)
 
         inputs = tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=512, padding=True
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1024,  # Increase max_length
+            padding=True,
+            add_special_tokens=True,
         ).to(model.device)
 
         with torch.no_grad():
@@ -72,7 +78,7 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
                 **inputs,
                 max_new_tokens=512,
                 do_sample=False,
-                top_p=0.95,
+                temperature=0.0,  # Use greedy decoding for pass@1
                 num_beams=1,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
@@ -97,9 +103,14 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
 
 def extract_completion(decoded_output, prompt):
     completion = decoded_output[len(prompt) :].strip()
-    # Remove everything after the first function definition that appears after the completion
+    # Only cut at function definitions that aren't part of the solution
     if "\ndef " in completion:
-        completion = completion[: completion.index("\ndef ")].strip()
+        # Find the first function definition that isn't indented
+        lines = completion.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("def ") and i > 0:
+                completion = "\n".join(lines[:i]).strip()
+                break
     return completion
 
 
