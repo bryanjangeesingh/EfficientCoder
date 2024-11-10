@@ -48,64 +48,41 @@ def load_model_and_tokenizer(rank):
     return model, tokenizer
 
 
-def generate_on_gpu(
-    rank, world_size, problems_chunk, num_samples_per_task=200, progress_queue=None
-):
+def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
     """Generate completions on a specific GPU"""
     setup(rank, world_size)
-
     model, tokenizer = load_model_and_tokenizer(rank)
     samples = []
 
-    total_problems = len(problems_chunk)
+    for task_id, problem in problems_chunk:
+        prompt = generate_prompt(problem)
 
-    for i, (task_id, problem) in enumerate(problems_chunk):
-        prompt = f"{problem['prompt']}\n"
+        inputs = tokenizer(
+            prompt, return_tensors="pt", truncation=True, max_length=512
+        ).to(model.device)
 
-        # Process in smaller chunks to manage memory
-        chunk_size = 20
-        completions = []
-
-        for j in range(0, num_samples_per_task, chunk_size):
-            current_chunk_size = min(chunk_size, num_samples_per_task - j)
-
-            inputs = tokenizer(
-                prompt, return_tensors="pt", truncation=True, max_length=200
-            ).to(model.device)
-
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    temperature=0.2,
-                    top_p=0.95,
-                    do_sample=True,
-                    pad_token_id=tokenizer.eos_token_id,
-                    num_return_sequences=current_chunk_size,
-                )
-
-            decoded_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            batch_completions = [
-                output[len(prompt) :].strip() for output in decoded_outputs
-            ]
-            completions.extend(batch_completions)
-
-            # Clear cache after each chunk
-            torch.cuda.empty_cache()
-
-        for completion in completions:
-            samples.append(
-                {"task_id": task_id, "completion": completion, "gpu_id": rank}
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=200,
+                do_sample=False,  # Greedy decoding for pass@1
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                num_return_sequences=1,
             )
 
-        # Save intermediate results from this GPU
+        decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        completion = decoded_output[len(prompt) :].strip()
+
+        samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
+
+        if progress_queue is not None:
+            progress_queue.put(1)
+
+        # Save intermediate results
         with open(f"completions_gpu_{rank}.jsonl", "w") as f:
             for sample in samples:
                 f.write(json.dumps(sample) + "\n")
-
-        # Update progress
-        if progress_queue is not None:
-            progress_queue.put(1)
 
     cleanup()
     return samples
