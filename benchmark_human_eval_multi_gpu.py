@@ -42,7 +42,9 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
 
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
-        prompt = problem["prompt"]  # Use only the provided prompt directly
+        # Fix the prompt formatting
+        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+
         try:
             inputs = tokenizer(
                 prompt,
@@ -58,7 +60,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
                     input_ids=inputs.input_ids,
                     attention_mask=inputs.attention_mask,
                     max_new_tokens=512,
-                    do_sample=False,
+                    do_sample=False,  # Ensure deterministic output
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                     num_return_sequences=1,
