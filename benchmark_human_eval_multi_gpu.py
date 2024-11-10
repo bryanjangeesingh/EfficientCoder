@@ -165,12 +165,17 @@ sys.path.append("/home/brytech/human-eval/human_eval")
 from evaluation import evaluate_functional_correctness
 import json
 
-results = evaluate_functional_correctness("{}")
-with open("results.json", "w") as f:
-    json.dump(results, f, indent=2)
-print(f"Pass@1: {results['pass@1']:.3f}")
+def main():
+    output_file = "{output_file}"
+    results = evaluate_functional_correctness(output_file)
+    with open("results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Pass@1: {{results['pass@1']:.3f}}")
+
+if __name__ == "__main__":
+    main()
 """.format(
-        args.output_file
+        output_file=args.output_file
     )
 
     with open("run_eval.py", "w") as f:
