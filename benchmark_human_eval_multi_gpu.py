@@ -50,9 +50,7 @@ def load_model_and_tokenizer(rank):
 
 def generate_prompt(problem):
     """Generate prompt for the model"""
-    return f"""# Here's a Python function that {problem['description']}
-{problem['prompt']}
-"""
+    return problem["prompt"]
 
 
 def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
@@ -79,7 +77,7 @@ def generate_on_gpu(rank, world_size, problems_chunk, progress_queue=None):
             )
 
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
-        completion = decoded_output[len(prompt):].strip()
+        completion = decoded_output[len(prompt) :].strip()
 
         samples.append({"task_id": task_id, "completion": completion, "gpu_id": rank})
 
