@@ -10,6 +10,7 @@ import logging
 import argparse
 import sys
 import numpy as np
+from typing import List, Dict
 
 
 sys.path.append("/home/brytech/human-eval/human_eval")
