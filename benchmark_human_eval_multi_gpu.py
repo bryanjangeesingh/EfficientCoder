@@ -21,78 +21,86 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class CodeLlamaEvaluator:
-    def __init__(self, gpu_id: int):
-        """Initialize Code Llama model on specified GPU."""
-        self.device = f"cuda:{gpu_id}"
-        logger.info(f"Loading model on GPU {gpu_id}...")
+def setup_gpu_process(rank):
+    """Set up process-specific GPU settings."""
+    torch.cuda.set_device(rank)
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            "codellama/CodeLlama-7b-hf",
-            torch_dtype=torch.float16,
-            device_map=self.device,
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
-        # Set pad token to eos token if not set
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+def evaluate_on_gpu(
+    gpu_id: int, problems: List[Dict], output_file: str, lock: FileLock
+):
+    """Evaluate problems on a specific GPU."""
+    setup_gpu_process(gpu_id)
+    logger.info(f"Starting evaluation on GPU {gpu_id}")
 
-    def generate_completion(self, prompt: str, max_new_tokens: int = 512) -> str:
-        """Generate code completion for a given prompt."""
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=4096,  # Add max length to prevent potential issues
-            return_attention_mask=True,
-        ).to(self.device)
+    # Initialize model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(
+        "codellama/CodeLlama-7b-hf",
+        torch_dtype=torch.float16,
+        device_map=f"cuda:{gpu_id}",
+    )
+    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,  # Deterministic for pass@1
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                num_return_sequences=1,
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    completions = []
+    for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
+        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+        try:
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=4096,
+                return_attention_mask=True,
+            ).to(f"cuda:{gpu_id}")
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    num_return_sequences=1,
+                )
+
+            completion = tokenizer.decode(
+                outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+            ).strip()
+
+            completions.append(
+                {"task_id": problem["task_id"], "completion": completion}
             )
 
-        completion = self.tokenizer.decode(
-            outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-        )
-        return completion.strip()
+        except Exception as e:
+            logger.error(
+                f"Error processing task {problem['task_id']} on GPU {gpu_id}: {str(e)}"
+            )
+            completions.append({"task_id": problem["task_id"], "completion": ""})
 
-    def process_problems(self, problems: List[Dict]) -> List[Dict]:
-        """Process a batch of HumanEval problems."""
-        completions = []
+    # Save completions with lock to prevent file conflicts
+    with lock:
+        if os.path.exists(output_file):
+            with open(output_file, "r") as f:
+                existing_completions = [json.loads(line) for line in f]
+            completions.extend(existing_completions)
 
-        for problem in tqdm(problems, desc=f"Processing on GPU {self.device}"):
-            prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
-            try:
-                completion = self.generate_completion(prompt)
-                completions.append(
-                    {"task_id": problem["task_id"], "completion": completion}
-                )
-            except Exception as e:
-                logger.error(f"Error processing task {problem['task_id']}: {str(e)}")
-                completions.append(
-                    {
-                        "task_id": problem["task_id"],
-                        "completion": "",  # Empty completion on error
-                    }
-                )
+        write_jsonl(output_file, completions)
 
-        return completions
+    # Clean up
+    del model
+    torch.cuda.empty_cache()
 
 
 def distribute_problems(problems: Dict, n_gpus: int) -> List[List[Dict]]:
     """Distribute problems evenly across GPUs."""
     problems_list = list(problems.values())
     chunks = np.array_split(problems_list, n_gpus)
-    return [chunk.tolist() for chunk in chunks]  # Convert numpy arrays back to lists
+    return [chunk.tolist() for chunk in chunks]
 
 
 def main():
@@ -117,27 +125,29 @@ def main():
 
     # Load HumanEval problems
     problems = read_problems()
-
-    # Distribute problems across GPUs
     problem_chunks = distribute_problems(problems, n_gpus)
 
-    # Create evaluators and process problems
-    all_completions = []
+    # Initialize multiprocessing method
+    mp.set_start_method("spawn", force=True)
+
+    # Create a file lock for safe writing
+    lock = FileLock(f"{args.output_file}.lock")
+
+    # Create and start processes
+    processes = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
-        try:
-            evaluator = CodeLlamaEvaluator(gpu_id)
-            completions = evaluator.process_problems(problem_chunk)
-            all_completions.extend(completions)
-            del evaluator  # Free up GPU memory
-            torch.cuda.empty_cache()
-        except Exception as e:
-            logger.error(f"Error on GPU {gpu_id}: {str(e)}")
-            continue
+        p = mp.Process(
+            target=evaluate_on_gpu, args=(gpu_id, problem_chunk, args.output_file, lock)
+        )
+        p.start()
+        processes.append(p)
 
-    # Save completions
-    write_jsonl(args.output_file, all_completions)
+    # Wait for all processes to complete
+    for p in processes:
+        p.join()
 
-    # Evaluate pass@1
+    # Evaluate final results
+    logger.info("All GPUs finished processing. Evaluating results...")
     results = evaluate_functional_correctness(args.output_file)
 
     # Print and save results
