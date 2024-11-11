@@ -17,13 +17,16 @@ from evaluation import evaluate_functional_correctness
 
 def load_model_and_tokenizer():
     """Load CodeLlama model and tokenizer"""
-    model_name = "codellama/CodeLlama-7b-hf"
+    model_name = "codellama/CodeLlama-7b-Python-hf"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.float16, device_map="auto"
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python_model",
     )
     return model, tokenizer
 
@@ -114,6 +117,7 @@ def batch_generate_completions(
 
 def format_prompt(problem: Dict) -> str:
     """Return a clean prompt that only includes the function signature."""
+
     prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
     return prompt
 
