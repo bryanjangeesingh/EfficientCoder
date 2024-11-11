@@ -17,7 +17,7 @@ from evaluation import evaluate_functional_correctness
 
 def load_model_and_tokenizer():
     """Load CodeLlama model and tokenizer"""
-    model_name = "codellama/CodeLlama-7b-Python-hf"
+    model_name = "codellama/CodeLlama-7b-Instruct-hf"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -26,7 +26,7 @@ def load_model_and_tokenizer():
         model_name,
         torch_dtype=torch.float16,
         device_map="auto",
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python_model",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_instruct",
     )
     return model, tokenizer
 
