@@ -8,12 +8,21 @@ import multiprocessing
 import platform
 import signal
 import tempfile
-
+import re
 
 def indent_completion(completion: str) -> str:
     """Indent the completion so it fits as the body of the function."""
     return "\n".join("    " + line if line else "" for line in completion.splitlines())
 
+def cut_string_at_newline(string):
+    # Search for the first occurrence of "\n" followed by any non-space character
+    match = re.search(r'\n(?=\S)', string)
+    if match:
+        # Slice the string up to and including the newline
+        return string[:match.start() + 1]
+    else:
+        # Return the original string if no match is found
+        return string
 
 def unsafe_execute(problem, completion, timeout, result):
     with create_tempdir():
@@ -38,8 +47,8 @@ def unsafe_execute(problem, completion, timeout, result):
         #     + f"check({problem['entry_point']})"
         # )
         check_program = (
-            problem["prompt"]
-            + indent_completion(completion)
+            problem["prompt"] + "    "
+            + cut_string_at_newline(completion)
             + "\n"
             + problem["test"]
             + "\n"

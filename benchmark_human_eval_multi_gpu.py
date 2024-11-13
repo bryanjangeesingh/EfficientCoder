@@ -11,7 +11,8 @@ import numpy as np
 from typing import List, Dict
 from filelock import FileLock
 
-sys.path.append("/home/brytech/human-eval/human_eval")
+# TODO: Change this so it points to the human eval folder (might already work for you)
+sys.path.append("./human-eval/human_eval")
 from data import write_jsonl, read_problems
 from evaluation import evaluate_functional_correctness
 
@@ -33,6 +34,8 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
         "codellama/CodeLlama-7b-hf",
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
+        # TODO: Change the path to use your username
+        cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct"
     )
     tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
@@ -42,8 +45,31 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Fix the prompt formatting
-        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
 
+        # prompt = problem['prompt']  # 0.031
+
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"  # 0.156
+
+        # prompt = f"# Complete the following Python function (this is a coding exercise):\n\n{problem['prompt']}"  # 0.094
+        # prompt = f"# Complete the following Python exercise:\n\n{problem['prompt']}"  # 0.094
+        # prompt = f"# This is a coding exercise. Complete the following Python function:\n\n{problem['prompt']}" # 0.062
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    "  # 0.312s
+        
+        # prompt = f"# This Python function is correctly implemented.\n\n{problem['prompt']}" # 0.125
+        # prompt = f"# This Python function is an exercise and is correctly implemented.\n\n{problem['prompt']}" # 0.125
+
+        # prompt = f"# Complete the function:\n\n{problem['prompt']}"  # 0.062
+        # prompt = f"# Implement the function:\n\n{problem['prompt']}"  # 0.094
+        # prompt = f"# Implement the following Python function:\n\n{problem['prompt']}    " #0.062
+        # prompt = f"# Implement the following Python function:\n\n{problem['prompt']}    # TODO: Your code here\n    "  # 0.062
+        
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    \n    "  # 0.125
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here"  # 0.344s / 0.156mb / 0.14b
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here\n" # 0.156mb
+        # prompt = f"{problem['prompt']}    # Your code here" # 0.062mb
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    "  # 0.312s / 0.141mb
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here"
+        prompt = problem['prompt']
         try:
             inputs = tokenizer(
                 prompt,
