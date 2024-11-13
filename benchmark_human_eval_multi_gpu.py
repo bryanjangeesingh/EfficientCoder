@@ -42,7 +42,8 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Fix the prompt formatting
-        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+        prompt = problem["prompt"]
 
         try:
             inputs = tokenizer(
