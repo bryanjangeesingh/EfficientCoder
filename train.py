@@ -13,6 +13,9 @@ import numpy as np
 from typing import List, Tuple, Dict
 from accelerate import Accelerator
 import torch.distributed as dist
+import json
+from pathlib import Path
+import random
 
 class CodeDistillationDataset(Dataset):
     def __init__(self, code_samples: List[str], tokenizer, max_length: int = 512):
@@ -39,171 +42,250 @@ class CodeDistillationDataset(Dataset):
         }
 
 
+class CodeSearchNetDataset(Dataset):
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer,
+        max_length: int = 512,
+        languages: List[str] = ["python"],
+        max_samples_per_language: int = None,
+    ):
+        """
+        Initialize CodeSearchNet dataset.
+        
+        Args:
+            data_path: Path to CodeSearchNet data directory
+            tokenizer: Tokenizer to use for encoding
+            max_length: Maximum sequence length
+            languages: List of programming languages to include
+            max_samples_per_language: Maximum number of samples per language
+        """
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.languages = languages
+        
+        # Load and process the data
+        self.samples = []
+        for lang in languages:
+            lang_path = self.data_path / lang / "final" / "jsonl"
+            if not lang_path.exists():
+                raise ValueError(f"Path not found: {lang_path}")
+            
+            # Load train.jsonl
+            train_file = lang_path / "train.jsonl"
+            with open(train_file) as f:
+                lang_samples = [json.loads(line) for line in f]
+            
+            # Filter out samples with empty or invalid code
+            lang_samples = [
+                sample for sample in lang_samples
+                if sample["code"] and len(sample["code"].strip()) > 0
+            ]
+            
+            # Limit samples if specified
+            if max_samples_per_language:
+                lang_samples = lang_samples[:max_samples_per_language]
+            
+            self.samples.extend(lang_samples)
+        
+        # Shuffle the samples
+        random.shuffle(self.samples)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        code = sample["code"]
+        
+        # Add special tokens and formatting
+        formatted_code = f"# {sample['docstring']}\n{code}" if "docstring" in sample else code
+        
+        # Tokenize
+        inputs = self.tokenizer(
+            formatted_code,
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        
+        return {
+            "input_ids": inputs["input_ids"].squeeze(),
+            "attention_mask": inputs["attention_mask"].squeeze(),
+            "original_text": formatted_code,
+            "language": sample.get("language", "python"),
+            "repo": sample.get("repo", ""),
+            "path": sample.get("path", ""),
+        }
+
+    @staticmethod
+    def collate_fn(batch):
+        """Custom collate function for DataLoader."""
+        return {
+            "input_ids": torch.stack([x["input_ids"] for x in batch]),
+            "attention_mask": torch.stack([x["attention_mask"] for x in batch]),
+            "original_text": [x["original_text"] for x in batch],
+            "language": [x["language"] for x in batch],
+            "repo": [x["repo"] for x in batch],
+            "path": [x["path"] for x in batch],
+        }
+
+
 class MultiTeacherDistillation:
     def __init__(
         self,
+        teacher1_model_name: str = "codellama/CodeLlama-34b-hf",        # General CodeLlama
+        teacher2_model_name: str = "codellama/CodeLlama-7b-Python-hf",  # Python-specialized
+        student_model_name: str = "anudaw/distilled-code-llama",        # Distilled version
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.device = device
         self.temperature = temperature
+        self.teacher1_model_name = teacher1_model_name
+        self.teacher2_model_name = teacher2_model_name
+        self.student_model_name = student_model_name
         
         # Initialize accelerator for distributed training
         self.accelerator = Accelerator()
         
         # Configure model loading with optimal settings for V100s
-        model_kwargs = {
+        teacher1_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": "auto",
-            "max_memory": {i: "28GB" for i in range(torch.cuda.device_count())},  # Reserve some memory for gradients
-            "offload_folder": "offload_folder",  # For potential CPU offloading if needed
+            "max_memory": {i: "28GB" for i in range(torch.cuda.device_count())},
         }
 
-        # Initialize models with distributed setup
-        self.code_llama = AutoModelForCausalLM.from_pretrained(
-            "codellama/CodeLlama-34b-hf",
-            **model_kwargs
+        teacher2_kwargs = {
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+            "max_memory": {i: "16GB" for i in range(torch.cuda.device_count())},
+        }
+
+        student_kwargs = {
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+            "max_memory": {i: "8GB" for i in range(torch.cuda.device_count())},
+        }
+
+        # Initialize teacher1 (CodeLlama-34B general)
+        self.teacher1 = AutoModelForCausalLM.from_pretrained(
+            self.teacher1_model_name,
+            **teacher1_kwargs
         )
         
-        # Initialize CodeT5p-2B with memory optimizations
-        self.code_t5 = T5ForConditionalGeneration.from_pretrained(
-            "Salesforce/codet5p-2b",
-            torch_dtype=torch.float16,
-            device_map="auto",
-            max_memory={i: "24GB" for i in range(torch.cuda.device_count())},  # Reserve memory for other models
+        # Initialize teacher2 (CodeLlama-7B Python)
+        self.teacher2 = AutoModelForCausalLM.from_pretrained(
+            self.teacher2_model_name,
+            **teacher2_kwargs
         )
 
-        # Initialize student model (3B distilled CodeLlama)
-        student_model_name = "anudaw/distilled-code-llama"
+        # Initialize student model (distilled)
         self.student = AutoModelForCausalLM.from_pretrained(
-            student_model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            max_memory={i: "8GB" for i in range(torch.cuda.device_count())},  # Smaller memory footprint for 3B model
+            self.student_model_name,
+            **student_kwargs
         )
 
-        # Initialize tokenizers
-        self.llama_tokenizer = AutoTokenizer.from_pretrained(
-            "codellama/CodeLlama-34b-hf"
-        )
-        self.t5_tokenizer = AutoTokenizer.from_pretrained("Salesforce/codet5p-2b")
-        self.student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
+        # Initialize tokenizer (all use the same CodeLlama tokenizer)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Initialize sentence embedder for alignment
-        self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2").to(device)
-
-        # Initialize optimizer with gradient accumulation
+        # Initialize optimizer
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
         
         # Prepare for distributed training
-        self.student, self.optimizer, self.code_t5 = self.accelerator.prepare(
-            self.student, self.optimizer, self.code_t5
+        self.student, self.optimizer = self.accelerator.prepare(
+            self.student, self.optimizer
         )
 
     def get_embeddings(self, text: str) -> torch.Tensor:
         """Convert text to embeddings using sentence transformer."""
         return torch.tensor(self.sentence_embedder.encode(text))
 
-    def compute_adaptive_weights(
-        self, llama_confidence: float, t5_confidence: float
-    ) -> Tuple[float, float]:
-        """Compute adaptive weights based on model confidences."""
-        total = llama_confidence + t5_confidence
-        return llama_confidence / total, t5_confidence / total
-
-    def get_teacher_outputs(
-        self, input_text: str
-    ) -> Tuple[torch.Tensor, torch.Tensor, float, float]:
-        """Get outputs from both teacher models."""
-        # Code Llama generation
-        llama_inputs = self.llama_tokenizer(input_text, return_tensors="pt").to(
-            self.device
-        )
-        with torch.no_grad():
-            llama_outputs = self.code_llama.generate(
-                **llama_inputs,
-                max_length=100,
-                num_return_sequences=1,
-                output_scores=True,
-                return_dict_in_generate=True,
-            )
-        llama_text = self.llama_tokenizer.decode(llama_outputs.sequences[0])
-        llama_confidence = torch.mean(
-            torch.softmax(llama_outputs.scores[0], dim=-1).max(dim=-1)[0]
-        )
-
-        # CodeT5 generation
-        t5_inputs = self.t5_tokenizer(input_text, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            t5_outputs = self.code_t5.generate(
-                **t5_inputs,
-                max_length=100,
-                num_return_sequences=1,
-                output_scores=True,
-                return_dict_in_generate=True,
-            )
-        t5_text = self.t5_tokenizer.decode(t5_outputs.sequences[0])
-        t5_confidence = torch.mean(
-            torch.softmax(t5_outputs.scores[0], dim=-1).max(dim=-1)[0]
-        )
-
-        # Convert outputs to embeddings
-        llama_embeddings = self.get_embeddings(llama_text)
-        t5_embeddings = self.get_embeddings(t5_text)
-
-        return (
-            llama_embeddings,
-            t5_embeddings,
-            llama_confidence.item(),
-            t5_confidence.item(),
-        )
-
-    def compute_kl_divergence(
-        self, student_embeddings: torch.Tensor, teacher_embeddings: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute KL divergence between student and teacher embeddings."""
-        student_dist = F.softmax(student_embeddings / self.temperature, dim=-1)
-        teacher_dist = F.softmax(teacher_embeddings / self.temperature, dim=-1)
-
-        return F.kl_div(student_dist.log(), teacher_dist, reduction="batchmean") * (
-            self.temperature**2
-        )
-
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> float:
-        """Perform one training step."""
+        """Perform one training step with multi-teacher distillation."""
         self.optimizer.zero_grad()
-
         total_loss = 0
         batch_size = input_batch["input_ids"].shape[0]
 
         for i in range(batch_size):
-            input_text = self.student_tokenizer.decode(input_batch["input_ids"][i])
+            input_ids = input_batch["input_ids"][i].unsqueeze(0).to(self.device)
+            
+            # Get teacher outputs
+            with torch.no_grad():
+                teacher1_outputs = self.teacher1(input_ids)
+                teacher2_outputs = self.teacher2(input_ids)
+            
+            # Get student outputs
+            student_outputs = self.student(input_ids)
 
-            # Get teacher outputs and confidences
-            llama_emb, t5_emb, llama_conf, t5_conf = self.get_teacher_outputs(
-                input_text
+            # Apply temperature scaling to logits
+            teacher1_logits = teacher1_outputs.logits / self.temperature
+            teacher2_logits = teacher2_outputs.logits / self.temperature
+            student_logits = student_outputs.logits / self.temperature
+
+            # Convert to probability distributions
+            teacher1_probs = F.softmax(teacher1_logits, dim=-1)
+            teacher2_probs = F.softmax(teacher2_logits, dim=-1)
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+
+            # Compute teacher confidence scores
+            teacher1_conf = torch.max(teacher1_probs, dim=-1)[0].mean()
+            teacher2_conf = torch.max(teacher2_probs, dim=-1)[0].mean()
+            
+            # Compute adaptive weights based on confidence
+            total_conf = teacher1_conf + teacher2_conf
+            teacher1_weight = teacher1_conf / total_conf
+            teacher2_weight = teacher2_conf / total_conf
+
+            # Compute KL divergence losses for each teacher
+            kl_loss_teacher1 = F.kl_div(
+                student_log_probs,
+                teacher1_probs,
+                reduction='batchmean',
+                log_target=False
+            ) * (self.temperature ** 2)
+
+            kl_loss_teacher2 = F.kl_div(
+                student_log_probs,
+                teacher2_probs,
+                reduction='batchmean',
+                log_target=False
+            ) * (self.temperature ** 2)
+
+            # Compute weighted distillation loss # naturally we would want to put more weight on the more confident teacher
+            distill_loss = (teacher1_weight * kl_loss_teacher1 + 
+                          teacher2_weight * kl_loss_teacher2)
+
+            # Compute cross-entropy loss with ground truth (next token prediction)
+            shift_logits = student_outputs.logits[:, :-1, :].contiguous()
+            shift_labels = input_ids[:, 1:].contiguous()
+            ce_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
             )
 
-            # Generate student output
-            student_output = self.student.generate(
-                input_batch["input_ids"][i].unsqueeze(0).to(self.device),
-                max_length=100,
-                num_return_sequences=1,
-                output_scores=True,
-                return_dict_in_generate=True,
-            )
-            student_text = self.student_tokenizer.decode(student_output.sequences[0])
-            student_emb = self.get_embeddings(student_text)
+            # Optional: Add consistency loss between teachers
+            teacher_consistency_loss = F.kl_div(
+                F.log_softmax(teacher1_logits, dim=-1),
+                F.softmax(teacher2_logits, dim=-1),
+                reduction='batchmean',
+                log_target=False
+            ) * (self.temperature ** 2)
 
-            # Compute adaptive weights
-            llama_weight, t5_weight = self.compute_adaptive_weights(llama_conf, t5_conf)
-
-            # Compute distillation losses
-            llama_loss = self.compute_kl_divergence(student_emb, llama_emb)
-            t5_loss = self.compute_kl_divergence(student_emb, t5_emb)
-
-            # Combine losses with adaptive weights
-            combined_loss = llama_weight * llama_loss + t5_weight * t5_loss
+            # Combine all losses
+            alpha = 0.1  # weight for CE loss
+            beta = 0.8   # weight for distillation loss
+            gamma = 0.1  # weight for teacher consistency loss
+            
+            combined_loss = (alpha * ce_loss + 
+                           beta * distill_loss + 
+                           gamma * teacher_consistency_loss)
+            
             total_loss += combined_loss
 
         avg_loss = total_loss / batch_size
