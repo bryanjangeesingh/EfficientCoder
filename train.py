@@ -156,6 +156,7 @@ class MultiTeacherDistillation:
         teacher1_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": {
+                # Embeddings and first half of layers on GPU 0
                 "model.embed_tokens": 0,
                 "model.layers.0": 0,
                 "model.layers.1": 0,
@@ -171,8 +172,9 @@ class MultiTeacherDistillation:
                 "model.layers.11": 0,
                 "model.layers.12": 0,
                 "model.layers.13": 0,
-                "model.layers.14": 1,
-                "model.layers.15": 1,
+                "model.layers.14": 0,
+                "model.layers.15": 0,
+                # Second half of layers on GPU 1
                 "model.layers.16": 1,
                 "model.layers.17": 1,
                 "model.layers.18": 1,
@@ -185,6 +187,12 @@ class MultiTeacherDistillation:
                 "model.layers.25": 1,
                 "model.layers.26": 1,
                 "model.layers.27": 1,
+                "model.layers.28": 1,
+                "model.layers.29": 1,
+                "model.layers.30": 1,
+                "model.layers.31": 1,
+                "model.layers.32": 1,
+                # Final layers on GPU 1
                 "model.norm": 1,
                 "lm_head": 1
             }
