@@ -7,7 +7,6 @@ from transformers import (
     AutoModel,
     T5ForConditionalGeneration,
 )
-from sentence_transformers import SentenceTransformer
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import List, Tuple, Dict
@@ -16,31 +15,6 @@ import torch.distributed as dist
 import json
 from pathlib import Path
 import random
-
-class CodeDistillationDataset(Dataset):
-    def __init__(self, code_samples: List[str], tokenizer, max_length: int = 512):
-        self.code_samples = code_samples
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.code_samples)
-
-    def __getitem__(self, idx):
-        code = self.code_samples[idx]
-        inputs = self.tokenizer(
-            code,
-            truncation=True,
-            max_length=self.max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        return {
-            "input_ids": inputs["input_ids"].squeeze(),
-            "attention_mask": inputs["attention_mask"].squeeze(),
-            "original_text": code,
-        }
-
 
 class CodeSearchNetDataset(Dataset):
     def __init__(
@@ -296,10 +270,10 @@ class MultiTeacherDistillation:
 
     def train(
         self,
-        train_dataset: CodeDistillationDataset,
+        train_dataset: CodeSearchNetDataset,
         num_epochs: int,
         batch_size: int,
-        eval_dataset: CodeDistillationDataset = None,
+        eval_dataset: CodeSearchNetDataset = None,
     ):
         """Train the student model."""
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -318,7 +292,7 @@ class MultiTeacherDistillation:
             if eval_dataset:
                 self.evaluate(eval_dataset, batch_size)
 
-    def evaluate(self, eval_dataset: CodeDistillationDataset, batch_size: int):
+    def evaluate(self, eval_dataset: CodeSearchNetDataset, batch_size: int):
         """Evaluate the student model."""
         self.student.eval()
         eval_loader = DataLoader(eval_dataset, batch_size=batch_size)

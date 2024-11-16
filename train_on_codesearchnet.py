@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 import argparse
 from pathlib import Path
-from train import MultiTeacherDistillation, CodeSearchNetDataset
+from train import CodeSearchNetDataset
 from transformers import AutoTokenizer
 import logging
 import wandb
@@ -76,6 +76,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Initialize distillation framework
+    from train import MultiTeacherDistillation
     distiller = MultiTeacherDistillation(
         temperature=args.temperature,
     )
