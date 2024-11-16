@@ -174,8 +174,8 @@ class MultiTeacherDistillation:
                 "model.layers.13": 0,
                 "model.layers.14": 0,
                 "model.layers.15": 0,
+                "model.layers.16": 0,
                 # Second half of layers on GPU 1
-                "model.layers.16": 1,
                 "model.layers.17": 1,
                 "model.layers.18": 1,
                 "model.layers.19": 1,
@@ -192,6 +192,7 @@ class MultiTeacherDistillation:
                 "model.layers.30": 1,
                 "model.layers.31": 1,
                 "model.layers.32": 1,
+                "model.layers.33": 1,
                 # Final layers on GPU 1
                 "model.norm": 1,
                 "lm_head": 1
