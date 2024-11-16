@@ -178,27 +178,8 @@ class MultiTeacherDistillation:
             **model_kwargs
         )
 
-        # Initialize tokenizers
-        logger.info("Loading tokenizers...")
-        teacher_tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
-        student_tokenizer = AutoTokenizer.from_pretrained(self.student_model_name)
-        
-        # Compare vocabularies
-        teacher_vocab = set(teacher_tokenizer.get_vocab().keys())
-        student_vocab = set(student_tokenizer.get_vocab().keys())
-        
-        # Find extra tokens in student vocabulary
-        extra_tokens = student_vocab - teacher_vocab
-        logger.info(f"\nVocabulary Analysis:")
-        logger.info(f"Teacher vocab size: {len(teacher_vocab)}")
-        logger.info(f"Student vocab size: {len(student_vocab)}")
-        logger.info(f"Extra tokens in student vocab ({len(extra_tokens)}):")
-        for token in sorted(extra_tokens):
-            token_id = student_tokenizer.get_vocab()[token]
-            logger.info(f"Token: {repr(token)}, ID: {token_id}")
-        
-        # Use teacher tokenizer for everything
-        self.tokenizer = teacher_tokenizer
+        # Initialize tokenizer (all use the same CodeLlama tokenizer)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -209,10 +190,6 @@ class MultiTeacherDistillation:
         self.student, self.optimizer = self.accelerator.prepare(
             self.student, self.optimizer
         )
-
-    def get_embeddings(self, text: str) -> torch.Tensor:
-        """Convert text to embeddings using sentence transformer."""
-        return torch.tensor(self.sentence_embedder.encode(text))
 
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> float:
         """Perform one training step with multi-teacher distillation."""
@@ -235,18 +212,6 @@ class MultiTeacherDistillation:
             teacher1_logits = teacher1_outputs.logits / self.temperature
             teacher2_logits = teacher2_outputs.logits / self.temperature
             student_logits = student_outputs.logits / self.temperature
-
-            # Get the minimum vocabulary size
-            min_vocab_size = min(
-                teacher1_logits.size(-1),
-                teacher2_logits.size(-1),
-                student_logits.size(-1)
-            )
-
-            # Truncate logits to the same vocabulary size
-            teacher1_logits = teacher1_logits[..., :min_vocab_size]
-            teacher2_logits = teacher2_logits[..., :min_vocab_size]
-            student_logits = student_logits[..., :min_vocab_size]
 
             # Convert to probability distributions
             teacher1_probs = F.softmax(teacher1_logits, dim=-1)
@@ -282,8 +247,8 @@ class MultiTeacherDistillation:
                           teacher2_weight * kl_loss_teacher2)
 
             # Compute cross-entropy loss with ground truth (next token prediction)
-            shift_logits = student_logits[:, :-1, :]
-            shift_labels = input_ids[:, 1:].clamp(max=min_vocab_size-1)  # Clamp labels to valid range
+            shift_logits = student_outputs.logits[:, :-1, :].contiguous()
+            shift_labels = input_ids[:, 1:].contiguous()
             ce_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1)
