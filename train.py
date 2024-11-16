@@ -141,6 +141,7 @@ class MultiTeacherDistillation:
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
+        """Initialize the distillation framework with models on different GPUs."""
         self.device = device
         self.temperature = temperature
         self.teacher1_model_name = teacher1_model_name
@@ -150,40 +151,75 @@ class MultiTeacherDistillation:
         # Initialize accelerator for distributed training
         self.accelerator = Accelerator()
         
-        # Configure model loading with optimal settings for V100s
+        # Configure model loading with explicit GPU assignments
+        # Teacher1 (34B) on GPU 0 and 1 (largest model)
         teacher1_kwargs = {
             "torch_dtype": torch.float16,
-            "device_map": "auto",
-            "max_memory": {i: "28GB" for i in range(torch.cuda.device_count())},
+            "device_map": {
+                "model.embed_tokens": 0,
+                "model.layers.0": 0,
+                "model.layers.1": 0,
+                "model.layers.2": 0,
+                "model.layers.3": 0,
+                "model.layers.4": 0,
+                "model.layers.5": 0,
+                "model.layers.6": 0,
+                "model.layers.7": 0,
+                "model.layers.8": 0,
+                "model.layers.9": 0,
+                "model.layers.10": 0,
+                "model.layers.11": 0,
+                "model.layers.12": 0,
+                "model.layers.13": 0,
+                "model.layers.14": 1,
+                "model.layers.15": 1,
+                "model.layers.16": 1,
+                "model.layers.17": 1,
+                "model.layers.18": 1,
+                "model.layers.19": 1,
+                "model.layers.20": 1,
+                "model.layers.21": 1,
+                "model.layers.22": 1,
+                "model.layers.23": 1,
+                "model.layers.24": 1,
+                "model.layers.25": 1,
+                "model.layers.26": 1,
+                "model.layers.27": 1,
+                "model.norm": 1,
+                "lm_head": 1
+            }
         }
 
+        # Teacher2 (7B) on GPU 2 (medium model)
         teacher2_kwargs = {
             "torch_dtype": torch.float16,
-            "device_map": "auto",
-            "max_memory": {i: "16GB" for i in range(torch.cuda.device_count())},
+            "device_map": "cuda:2"
         }
 
+        # Student (3B) on GPU 3 (smallest model)
         student_kwargs = {
             "torch_dtype": torch.float16,
-            "device_map": "auto",
-            "max_memory": {i: "8GB" for i in range(torch.cuda.device_count())},
+            "device_map": "cuda:3"
         }
 
-        # Initialize teacher1 (CodeLlama-34B general)
+        logger.info("Loading teacher1 (34B) on GPUs 0 and 1...")
         self.teacher1 = AutoModelForCausalLM.from_pretrained(
-            self.teacher1_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_34b",
+            self.teacher1_model_name, 
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_34b",
             **teacher1_kwargs
         )
         
-        # Initialize teacher2 (CodeLlama-7B Python)
+        logger.info("Loading teacher2 (7B) on GPU 2...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
-            self.teacher2_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python",
+            self.teacher2_model_name, 
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python",
             **teacher2_kwargs
         )
 
-        # Initialize student model (distilled)
+        logger.info("Loading student model (3B) on GPU 3...")
         self.student = AutoModelForCausalLM.from_pretrained(
-            self.student_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
+            self.student_model_name, 
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
             **student_kwargs
         )
 
