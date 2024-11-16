@@ -136,8 +136,8 @@ class MultiTeacherDistillation:
     def __init__(
         self,
         teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
-        teacher2_model_name: str = "codellama/CodeLlama-13b-Instruct-hf",  # Python-specialized
-        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Distilled version
+        teacher2_model_name: str = "codellama/CodeLlama-13b-Instruct-hf",  # Instruct version
+        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
@@ -164,14 +164,14 @@ class MultiTeacherDistillation:
             **model_kwargs
         )
         
-        logger.info("Loading teacher2 (7B) on GPU...")
+        logger.info("Loading teacher2 instruct (13B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
             self.teacher2_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
             **model_kwargs
         )
 
-        logger.info("Loading student model (3B) on GPU...")
+        logger.info("Loading student model (7B) on GPU...")
         self.student = AutoModelForCausalLM.from_pretrained(
             self.student_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
@@ -203,7 +203,19 @@ class MultiTeacherDistillation:
             # Get teacher outputs
             with torch.no_grad():
                 teacher1_outputs = self.teacher1(input_ids)
-                teacher2_outputs = self.teacher2(input_ids)
+                
+                # Format input with instruction for teacher2
+                code_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                instruct_prompt = f"[INST] Generate a Python function:\n{code_text} [/INST]"
+                instruct_inputs = self.tokenizer(
+                    instruct_prompt,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=input_ids.shape[1]
+                ).input_ids.to(self.device)
+                
+                teacher2_outputs = self.teacher2(instruct_inputs)
             
             # Get student outputs
             student_outputs = self.student(input_ids)

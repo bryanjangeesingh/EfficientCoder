@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 import logging
 import csv
 from datetime import datetime
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -146,12 +147,23 @@ def main():
         # Training
         distiller.student.train()
         total_train_loss = 0
-        for batch_idx, batch in enumerate(train_loader):
+        
+        # Progress bar for training
+        train_pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]",
+            leave=True,
+            dynamic_ncols=True  # Automatically adjust to terminal width
+        )
+        
+        for batch_idx, batch in enumerate(train_pbar):
             loss = distiller.train_step(batch)
             total_train_loss += loss
             
+            # Update progress bar with current loss
+            train_pbar.set_postfix({"Loss": f"{loss:.4f}"})
+            
             if batch_idx % 100 == 0:
-                logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss:.4f}")
                 # Log batch metrics
                 write_metrics(
                     train_metrics_file,
@@ -161,28 +173,35 @@ def main():
                 )
         
         avg_train_loss = total_train_loss / len(train_loader)
+        logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Average Train Loss: {avg_train_loss:.4f}")
         
         # Validation
         distiller.student.eval()
         total_val_loss = 0
+        
+        # Progress bar for validation
+        val_pbar = tqdm(
+            val_loader,
+            desc=f"Epoch {epoch+1}/{args.num_epochs} [Valid]",
+            leave=True,
+            dynamic_ncols=True
+        )
+        
         with torch.no_grad():
-            for batch in val_loader:
-                loss = distiller.train_step(batch)
+            for batch in val_pbar:
+                loss = distiller.train_step(batch)  # Using train_step but in eval mode
                 total_val_loss += loss
+                
+                # Update progress bar with current loss
+                val_pbar.set_postfix({"Loss": f"{loss:.4f}"})
         
         avg_val_loss = total_val_loss / len(val_loader)
+        logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Validation Loss: {avg_val_loss:.4f}")
         
         # Log epoch metrics
-        logger.info(f"Epoch {epoch+1}/{args.num_epochs}")
-        logger.info(f"Average Train Loss: {avg_train_loss:.4f}")
-        logger.info(f"Average Val Loss: {avg_val_loss:.4f}")
-        
         write_metrics(
             val_metrics_file,
-            {
-                'train_loss': f"{avg_train_loss:.4f}",
-                'val_loss': f"{avg_val_loss:.4f}"
-            },
+            {'loss': f"{avg_val_loss:.4f}"},
             epoch=epoch+1
         )
         
