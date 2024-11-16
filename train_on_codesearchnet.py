@@ -100,7 +100,6 @@ def main():
     
     # Create datasets
     logger.info("Loading datasets...")
-    import pdb; pdb.set_trace()
     train_dataset = CodeSearchNetDataset(
         data_path=args.data_path,
         tokenizer=distiller.tokenizer,
