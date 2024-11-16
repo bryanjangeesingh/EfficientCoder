@@ -147,19 +147,19 @@ class MultiTeacherDistillation:
 
         # Initialize teacher1 (CodeLlama-34B general)
         self.teacher1 = AutoModelForCausalLM.from_pretrained(
-            self.teacher1_model_name,
+            self.teacher1_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_34b",
             **teacher1_kwargs
         )
         
         # Initialize teacher2 (CodeLlama-7B Python)
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
-            self.teacher2_model_name,
+            self.teacher2_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python",
             **teacher2_kwargs
         )
 
         # Initialize student model (distilled)
         self.student = AutoModelForCausalLM.from_pretrained(
-            self.student_model_name,
+            self.student_model_name, cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
             **student_kwargs
         )
 
