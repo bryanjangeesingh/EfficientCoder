@@ -8,7 +8,7 @@ GRADIENT_ACCUMULATION_STEPS=8  # Accumulate gradients to simulate larger batch
 NUM_EPOCHS=10
 MAX_LENGTH=512
 LEARNING_RATE=1e-4
-TEMPERATURE=2.0
+TEMPERATURE=1.0  # Reduced from 2.0 for better stability
 MAX_SAMPLES=100000  # Set to None for full dataset
 
 # Create output directory
