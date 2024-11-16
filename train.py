@@ -156,7 +156,6 @@ class MultiTeacherDistillation:
             "torch_dtype": torch.float16,
             "device_map": "auto",  # Let HF handle device mapping
             "use_cache": False,  # Disable KV-cache for training
-            "use_flash_attention_2": True,  # Enable memory efficient attention
         }
 
         logger.info("Loading teacher1 (13B) on GPU...")
