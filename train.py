@@ -43,7 +43,7 @@ class CodeSearchNetDataset(Dataset):
         # Load and process the data
         self.samples = []
         for lang in languages:
-            lang_path = self.data_path / lang / "final" / "jsonl"
+            lang_path = self.data_path / lang / lang / "final" / "jsonl"
             if not lang_path.exists():
                 raise ValueError(f"Path not found: {lang_path}")
             
