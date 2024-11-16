@@ -164,7 +164,7 @@ def main():
             # Forward and backward pass
             loss = distiller.train_step(batch)
             loss = loss / args.gradient_accumulation_steps  # Scale loss
-            total_train_loss += loss  # loss is already a float
+            total_train_loss += loss.item()  # Convert to float for accumulation
             
             # Backward pass with gradient accumulation
             distiller.accelerator.backward(loss)
@@ -176,14 +176,14 @@ def main():
             
             # Update progress bar
             train_pbar.set_postfix({
-                "Loss": f"{loss * args.gradient_accumulation_steps:.4f}",
+                "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
                 "Acc Step": f"{(batch_idx + 1) % args.gradient_accumulation_steps}/{args.gradient_accumulation_steps}"
             })
             
             if batch_idx % 100 == 0:
                 write_metrics(
                     train_metrics_file,
-                    {'loss': f"{loss * args.gradient_accumulation_steps:.4f}"},
+                    {'loss': f"{loss.item() * args.gradient_accumulation_steps:.4f}"},
                     epoch=epoch+1,
                     batch=batch_idx
                 )

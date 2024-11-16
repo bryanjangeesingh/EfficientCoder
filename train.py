@@ -195,7 +195,7 @@ class MultiTeacherDistillation:
             self.student, self.optimizer
         )
 
-    def train_step(self, input_batch: Dict[str, torch.Tensor]) -> float:
+    def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Perform one training step with multi-teacher distillation."""
         self.optimizer.zero_grad()
         total_loss = 0
@@ -219,15 +219,7 @@ class MultiTeacherDistillation:
                     max_length=input_ids.shape[1]  # Match original sequence length
                 ).input_ids.to(self.device)
                 
-                # Ensure teacher2 output matches sequence length
                 teacher2_outputs = self.teacher2(instruct_inputs)
-                if teacher2_outputs.logits.shape[1] != input_ids.shape[1]:
-                    # Pad or truncate to match sequence length
-                    if teacher2_outputs.logits.shape[1] < input_ids.shape[1]:
-                        pad_size = input_ids.shape[1] - teacher2_outputs.logits.shape[1]
-                        teacher2_outputs.logits = F.pad(teacher2_outputs.logits, (0, 0, 0, pad_size))
-                    else:
-                        teacher2_outputs.logits = teacher2_outputs.logits[:, :input_ids.shape[1], :]
             
             # Get student outputs
             student_outputs = self.student(input_ids)
@@ -298,10 +290,7 @@ class MultiTeacherDistillation:
             total_loss += combined_loss
 
         avg_loss = total_loss / batch_size
-        self.accelerator.backward(avg_loss)
-        self.optimizer.step()
-
-        return avg_loss.item()
+        return avg_loss  
 
     def train(
         self,
