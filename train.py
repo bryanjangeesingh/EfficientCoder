@@ -135,7 +135,7 @@ class CodeSearchNetDataset(Dataset):
 class MultiTeacherDistillation:
     def __init__(
         self,
-        teacher1_model_name: str = "codellama/CodeLlama-34b-hf",        # General CodeLlama
+        teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
         teacher2_model_name: str = "codellama/CodeLlama-7b-Python-hf",  # Python-specialized
         student_model_name: str = "anudaw/distilled-code-llama",        # Distilled version
         temperature: float = 2.0,
@@ -152,52 +152,30 @@ class MultiTeacherDistillation:
         self.accelerator = Accelerator()
         
         # Configure model loading with explicit GPU assignments
-        # Teacher1 (34B) on GPU 0 and 1 (largest model)
-        teacher1_kwargs = {
+        model_kwargs = {
             "torch_dtype": torch.float16,
-            "device_map": {
-                # Embeddings and first half of layers on GPU 0
-                "model.embed_tokens": 0,
-                **{f"model.layers.{i}": 0 for i in range(44)},  # First 44 layers on GPU 0
-                # Second half of layers on GPU 1
-                **{f"model.layers.{i}": 1 for i in range(44, 89)},  # Remaining 44 layers on GPU 1
-                # Final layers on GPU 1
-                "model.norm": 1,
-                "lm_head": 1
-            }
+            "device_map": "auto",  # Let HF handle device mapping
         }
 
-        # Teacher2 (7B) on GPU 2 (medium model)
-        teacher2_kwargs = {
-            "torch_dtype": torch.float16,
-            "device_map": "cuda:2"
-        }
-
-        # Student (3B) on GPU 3 (smallest model)
-        student_kwargs = {
-            "torch_dtype": torch.float16,
-            "device_map": "cuda:3"
-        }
-
-        logger.info("Loading teacher1 (34B) on GPUs 0 and 1...")
+        logger.info("Loading teacher1 (13B) on GPU...")
         self.teacher1 = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_34b",
-            **teacher1_kwargs
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
+            **model_kwargs
         )
         
-        logger.info("Loading teacher2 (7B) on GPU 2...")
+        logger.info("Loading teacher2 (7B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
             self.teacher2_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_python",
-            **teacher2_kwargs
+            **model_kwargs
         )
 
-        logger.info("Loading student model (3B) on GPU 3...")
+        logger.info("Loading student model (3B) on GPU...")
         self.student = AutoModelForCausalLM.from_pretrained(
             self.student_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
-            **student_kwargs
+            **model_kwargs
         )
 
         # Initialize tokenizer (all use the same CodeLlama tokenizer)
