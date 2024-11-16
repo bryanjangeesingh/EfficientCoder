@@ -224,56 +224,35 @@ class MultiTeacherDistillation:
             # Get student outputs
             student_outputs = self.student(input_ids)
 
+            # Debug logit values
+            logger.debug(f"Logit stats before scaling - T1 max: {teacher1_outputs.logits.max():.2f}, min: {teacher1_outputs.logits.min():.2f}")
+            logger.debug(f"Logit stats before scaling - T2 max: {teacher2_outputs.logits.max():.2f}, min: {teacher2_outputs.logits.min():.2f}")
+            logger.debug(f"Logit stats before scaling - S max: {student_outputs.logits.max():.2f}, min: {student_outputs.logits.min():.2f}")
+
             # Apply temperature scaling to logits with gradient clipping
-            max_logit_value = 50.0  # Prevent extreme values
+            max_logit_value = 10.0  # Reduced from 50.0
             teacher1_logits = torch.clamp(teacher1_outputs.logits, -max_logit_value, max_logit_value) / self.temperature
             teacher2_logits = torch.clamp(teacher2_outputs.logits, -max_logit_value, max_logit_value) / self.temperature
             student_logits = torch.clamp(student_outputs.logits, -max_logit_value, max_logit_value) / self.temperature
 
             # Convert to probability distributions with numerical stability
+            eps = 1e-7
             teacher1_probs = F.softmax(teacher1_logits, dim=-1)
             teacher2_probs = F.softmax(teacher2_logits, dim=-1)
             student_log_probs = F.log_softmax(student_logits, dim=-1)
 
-            # Add small epsilon to avoid log(0)
-            eps = 1e-7
+            # Debug probability distributions
+            logger.debug(f"Prob stats - T1 max: {teacher1_probs.max():.4f}, min: {teacher1_probs.min():.4f}")
+            logger.debug(f"Prob stats - T2 max: {teacher2_probs.max():.4f}, min: {teacher2_probs.min():.4f}")
+            logger.debug(f"Log prob stats - S max: {student_log_probs.max():.4f}, min: {student_log_probs.min():.4f}")
+
+            # Add small epsilon and renormalize
             teacher1_probs = torch.clamp(teacher1_probs, min=eps, max=1.0)
             teacher2_probs = torch.clamp(teacher2_probs, min=eps, max=1.0)
+            teacher1_probs = teacher1_probs / teacher1_probs.sum(dim=-1, keepdim=True)
+            teacher2_probs = teacher2_probs / teacher2_probs.sum(dim=-1, keepdim=True)
 
-            # Compute teacher confidence scores
-            teacher1_conf = torch.max(teacher1_probs, dim=-1)[0].mean()
-            teacher2_conf = torch.max(teacher2_probs, dim=-1)[0].mean()
-            
-            # Compute adaptive weights based on confidence
-            total_conf = teacher1_conf + teacher2_conf + eps  # Avoid division by zero
-            teacher1_weight = teacher1_conf / total_conf
-            teacher2_weight = teacher2_conf / total_conf
-
-            # Compute KL divergence losses for each teacher
-            kl_loss_teacher1 = F.kl_div(
-                student_log_probs,
-                teacher1_probs,
-                reduction='batchmean',
-                log_target=False
-            )
-
-            kl_loss_teacher2 = F.kl_div(
-                student_log_probs,
-                teacher2_probs,
-                reduction='batchmean',
-                log_target=False
-            )
-
-            # Scale KL losses after computing to avoid extreme values
-            kl_scale = min(self.temperature ** 2, 100.0)  # Cap maximum scaling
-            kl_loss_teacher1 = kl_loss_teacher1 * kl_scale
-            kl_loss_teacher2 = kl_loss_teacher2 * kl_scale
-
-            # Compute weighted distillation loss
-            distill_loss = (teacher1_weight * kl_loss_teacher1 + 
-                          teacher2_weight * kl_loss_teacher2)
-
-            # Compute cross-entropy loss with ground truth (next token prediction)
+            # Compute cross-entropy loss first (most stable)
             shift_logits = student_outputs.logits[:, :-1, :].contiguous()
             shift_labels = input_ids[:, 1:].contiguous()
             ce_loss = F.cross_entropy(
@@ -281,26 +260,70 @@ class MultiTeacherDistillation:
                 shift_labels.view(-1)
             )
 
-            # Optional: Add consistency loss between teachers
+            # Early exit if CE loss is unstable
+            if torch.isnan(ce_loss):
+                logger.warning(f"NaN detected in CE loss, skipping batch")
+                return torch.tensor(0.0, device=ce_loss.device, requires_grad=True)
+
+            # Compute KL divergence losses with scaled temperature
+            kl_scale = min(self.temperature, 2.0)  # Cap maximum scaling
+            kl_loss_teacher1 = F.kl_div(
+                student_log_probs,
+                teacher1_probs,
+                reduction='batchmean',
+                log_target=False
+            ) * kl_scale
+
+            kl_loss_teacher2 = F.kl_div(
+                student_log_probs,
+                teacher2_probs,
+                reduction='batchmean',
+                log_target=False
+            ) * kl_scale
+
+            # Debug KL divergence values
+            logger.debug(f"KL loss values - T1: {kl_loss_teacher1:.4f}, T2: {kl_loss_teacher2:.4f}")
+
+            # Compute teacher confidence scores
+            teacher1_conf = torch.max(teacher1_probs, dim=-1)[0].mean()
+            teacher2_conf = torch.max(teacher2_probs, dim=-1)[0].mean()
+            total_conf = teacher1_conf + teacher2_conf + eps
+            teacher1_weight = teacher1_conf / total_conf
+            teacher2_weight = teacher2_conf / total_conf
+
+            # Compute weighted distillation loss
+            distill_loss = (teacher1_weight * kl_loss_teacher1 + 
+                          teacher2_weight * kl_loss_teacher2)
+
+            # Compute consistency loss with much smaller weight
             teacher_consistency_loss = F.kl_div(
                 F.log_softmax(teacher1_logits, dim=-1),
                 F.softmax(teacher2_logits, dim=-1),
                 reduction='batchmean',
                 log_target=False
-            ) * kl_scale
+            ) * 0.1  # Reduced scaling for consistency loss
 
-            # Combine all losses with gradient clipping
-            alpha = 0.1  # weight for CE loss
-            beta = 0.8   # weight for distillation loss
-            gamma = 0.1  # weight for teacher consistency loss
+            # Combine losses with adjusted weights
+            alpha = 0.5   # Increased CE weight
+            beta = 0.45   # Slightly reduced distillation weight
+            gamma = 0.05  # Much smaller consistency weight
             
             combined_loss = (alpha * ce_loss + 
                            beta * distill_loss + 
                            gamma * teacher_consistency_loss)
             
-            # Check for NaN and replace with zero if found
+            # Log all loss components
             if torch.isnan(combined_loss):
-                logger.warning(f"NaN loss detected! CE: {ce_loss.item()}, Distill: {distill_loss.item()}, Consistency: {teacher_consistency_loss.item()}")
+                logger.warning(
+                    f"NaN loss detected!\n"
+                    f"CE: {ce_loss.item():.4f}\n"
+                    f"Distill: {distill_loss.item():.4f}\n"
+                    f"Consistency: {teacher_consistency_loss.item():.4f}\n"
+                    f"T1 weight: {teacher1_weight.item():.4f}\n"
+                    f"T2 weight: {teacher2_weight.item():.4f}\n"
+                    f"KL T1: {kl_loss_teacher1.item():.4f}\n"
+                    f"KL T2: {kl_loss_teacher2.item():.4f}"
+                )
                 combined_loss = torch.tensor(0.0, device=combined_loss.device, requires_grad=True)
             
             total_loss += combined_loss
@@ -308,7 +331,7 @@ class MultiTeacherDistillation:
         avg_loss = total_loss / batch_size
         
         # Add gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=0.5)  # Reduced from 1.0
         
         return avg_loss  
 
