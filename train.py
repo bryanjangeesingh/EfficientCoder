@@ -210,12 +210,20 @@ class MultiTeacherDistillation:
                 instruct_inputs = self.tokenizer(
                     instruct_prompt,
                     return_tensors="pt",
-                    padding=True,
+                    padding='max_length',
                     truncation=True,
-                    max_length=input_ids.shape[1]
+                    max_length=input_ids.shape[1]  # Match original sequence length
                 ).input_ids.to(self.device)
                 
+                # Ensure teacher2 output matches sequence length
                 teacher2_outputs = self.teacher2(instruct_inputs)
+                if teacher2_outputs.logits.shape[1] != input_ids.shape[1]:
+                    # Pad or truncate to match sequence length
+                    if teacher2_outputs.logits.shape[1] < input_ids.shape[1]:
+                        pad_size = input_ids.shape[1] - teacher2_outputs.logits.shape[1]
+                        teacher2_outputs.logits = F.pad(teacher2_outputs.logits, (0, 0, 0, pad_size))
+                    else:
+                        teacher2_outputs.logits = teacher2_outputs.logits[:, :input_ids.shape[1], :]
             
             # Get student outputs
             student_outputs = self.student(input_ids)
