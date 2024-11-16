@@ -155,6 +155,8 @@ class MultiTeacherDistillation:
         model_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": "auto",  # Let HF handle device mapping
+            "use_cache": False,  # Disable KV-cache for training
+            "use_flash_attention_2": True,  # Enable memory efficient attention
         }
 
         logger.info("Loading teacher1 (13B) on GPU...")
@@ -163,6 +165,7 @@ class MultiTeacherDistillation:
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
             **model_kwargs
         )
+        self.teacher1.gradient_checkpointing_enable()  # Enable gradient checkpointing
         
         logger.info("Loading teacher2 instruct (13B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
@@ -170,21 +173,24 @@ class MultiTeacherDistillation:
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
             **model_kwargs
         )
-
+        self.teacher2.gradient_checkpointing_enable()
+        
         logger.info("Loading student model (7B) on GPU...")
         self.student = AutoModelForCausalLM.from_pretrained(
             self.student_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
             **model_kwargs
         )
+        self.student.gradient_checkpointing_enable()
 
         # Initialize tokenizer (all use the same CodeLlama tokenizer)
         self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Initialize optimizer
-        self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
+        # Initialize optimizer with 8-bit Adam for memory efficiency
+        from bitsandbytes.optim import AdamW8bit
+        self.optimizer = AdamW8bit(self.student.parameters(), lr=1e-4)
         
         # Prepare for distributed training
         self.student, self.optimizer = self.accelerator.prepare(

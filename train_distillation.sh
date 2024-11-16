@@ -3,7 +3,8 @@
 # Configuration
 DATA_PATH="/nobackup/users/brytech/codesearchnet"  # Update this path
 OUTPUT_DIR="./outputs/distillation_$(date +%Y%m%d_%H%M%S)"
-BATCH_SIZE=32
+BATCH_SIZE=4  # Reduced from 32
+GRADIENT_ACCUMULATION_STEPS=8  # Accumulate gradients to simulate larger batch
 NUM_EPOCHS=10
 MAX_LENGTH=512
 LEARNING_RATE=1e-4
@@ -33,6 +34,7 @@ python train_on_codesearchnet.py \
     --data_path $DATA_PATH \
     --output_dir $OUTPUT_DIR \
     --batch_size $BATCH_SIZE \
+    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --num_epochs $NUM_EPOCHS \
     --max_length $MAX_LENGTH \
     --learning_rate $LEARNING_RATE \

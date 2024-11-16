@@ -79,6 +79,12 @@ def parse_args():
         default=2.0,
         help="Temperature for distillation"
     )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps"
+    )
     return parser.parse_args()
 
 def main():
@@ -88,7 +94,6 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create metrics files
     train_metrics_file = output_dir / 'train_metrics.csv'
     val_metrics_file = output_dir / 'val_metrics.csv'
     
@@ -152,21 +157,33 @@ def main():
             train_loader,
             desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]",
             leave=True,
-            dynamic_ncols=True  # Automatically adjust to terminal width
+            dynamic_ncols=True
         )
         
         for batch_idx, batch in enumerate(train_pbar):
+            # Forward and backward pass
             loss = distiller.train_step(batch)
-            total_train_loss += loss
+            loss = loss / args.gradient_accumulation_steps  # Scale loss
+            total_train_loss += loss.item() * args.gradient_accumulation_steps
             
-            # Update progress bar with current loss
-            train_pbar.set_postfix({"Loss": f"{loss:.4f}"})
+            # Backward pass with gradient accumulation
+            distiller.accelerator.backward(loss)
+            
+            # Update weights every gradient_accumulation_steps
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                distiller.optimizer.step()
+                distiller.optimizer.zero_grad()
+            
+            # Update progress bar
+            train_pbar.set_postfix({
+                "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
+                "Acc Step": f"{(batch_idx + 1) % args.gradient_accumulation_steps}/{args.gradient_accumulation_steps}"
+            })
             
             if batch_idx % 100 == 0:
-                # Log batch metrics
                 write_metrics(
                     train_metrics_file,
-                    {'loss': f"{loss:.4f}"},
+                    {'loss': f"{loss.item() * args.gradient_accumulation_steps:.4f}"},
                     epoch=epoch+1,
                     batch=batch_idx
                 )
