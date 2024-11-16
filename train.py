@@ -136,7 +136,7 @@ class MultiTeacherDistillation:
     def __init__(
         self,
         teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
-        teacher2_model_name: str = "codellama/CodeLlama-13b-Python-hf",  # Python-specialized
+        teacher2_model_name: str = "codellama/CodeLlama-13b-Instruct-hf",  # Python-specialized
         student_model_name: str = "codellama/CodeLlama-7b-hf",        # Distilled version
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -167,7 +167,7 @@ class MultiTeacherDistillation:
         logger.info("Loading teacher2 (7B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
             self.teacher2_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_python",
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
             **model_kwargs
         )
 
