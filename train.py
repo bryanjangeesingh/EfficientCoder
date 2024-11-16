@@ -188,8 +188,7 @@ class MultiTeacherDistillation:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Initialize optimizer with 8-bit Adam for memory efficiency
-        from bitsandbytes.optim import AdamW8bit
-        self.optimizer = AdamW8bit(self.student.parameters(), lr=1e-4)
+        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=1e-4)
         
         # Prepare for distributed training
         self.student, self.optimizer = self.accelerator.prepare(
