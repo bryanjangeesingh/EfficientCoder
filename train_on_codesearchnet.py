@@ -103,14 +103,16 @@ def main():
         data_path=args.data_path,
         tokenizer=distiller.tokenizer,
         max_length=args.max_length,
-        max_samples_per_language=args.max_samples
+        max_samples_per_language=args.max_samples,
+        split="train"
     )
     
-    # Create validation set (10% of training data)
-    train_size = int(0.9 * len(train_dataset))
-    val_size = len(train_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        train_dataset, [train_size, val_size]
+    val_dataset = CodeSearchNetDataset(
+        data_path=args.data_path,
+        tokenizer=distiller.tokenizer,
+        max_length=args.max_length,
+        max_samples_per_language=args.max_samples // 10 if args.max_samples else None,
+        split="valid"
     )
     
     logger.info(f"Train dataset size: {len(train_dataset)}")

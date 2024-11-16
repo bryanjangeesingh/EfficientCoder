@@ -27,6 +27,7 @@ class CodeSearchNetDataset(Dataset):
         max_length: int = 512,
         languages: List[str] = ["python"],
         max_samples_per_language: int = None,
+        split: str = "train"  # Options: train, valid, test
     ):
         """
         Initialize CodeSearchNet dataset.
@@ -37,33 +38,39 @@ class CodeSearchNetDataset(Dataset):
             max_length: Maximum sequence length
             languages: List of programming languages to include
             max_samples_per_language: Maximum number of samples per language
+            split: Which data split to use (train, valid, or test)
         """
         self.data_path = Path(data_path)
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.languages = languages
+        self.split = split
+        
+        if split not in ["train", "valid", "test"]:
+            raise ValueError(f"Invalid split: {split}. Must be one of: train, valid, test")
         
         # Load and process the data
         self.samples = []
         for lang in languages:
-            lang_path = self.data_path / lang / lang / "final" / "jsonl"
+            # Path structure: {data_path}/{lang}/{lang}/final/jsonl/{split}/*.jsonl
+            lang_path = self.data_path / lang / lang / "final" / "jsonl" / split
             if not lang_path.exists():
                 raise ValueError(f"Path not found: {lang_path}")
             
             # Find all training files (they might be split into multiple parts)
-            train_files = list(lang_path.glob("python_train_*.jsonl"))
+            train_files = list(lang_path.glob("*.jsonl"))
             if not train_files:
-                raise ValueError(f"No training files found in {lang_path}")
+                raise ValueError(f"No {split} files found in {lang_path}")
             
-            logger.info(f"Found {len(train_files)} training files for {lang}")
+            logger.info(f"Found {len(train_files)} {split} files for {lang}")
             
-            # Load all training files
+            # Load all files for this split
             lang_samples = []
-            for train_file in train_files:
-                with open(train_file) as f:
+            for file in train_files:
+                with open(file) as f:
                     file_samples = [json.loads(line) for line in f]
                     lang_samples.extend(file_samples)
-                    logger.info(f"Loaded {len(file_samples)} samples from {train_file.name}")
+                    logger.info(f"Loaded {len(file_samples)} samples from {file.name}")
             
             # Filter out samples with empty or invalid code
             lang_samples = [
