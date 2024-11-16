@@ -178,8 +178,27 @@ class MultiTeacherDistillation:
             **model_kwargs
         )
 
-        # Initialize tokenizer (all use the same CodeLlama tokenizer)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
+        # Initialize tokenizers
+        logger.info("Loading tokenizers...")
+        teacher_tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
+        student_tokenizer = AutoTokenizer.from_pretrained(self.student_model_name)
+        
+        # Compare vocabularies
+        teacher_vocab = set(teacher_tokenizer.get_vocab().keys())
+        student_vocab = set(student_tokenizer.get_vocab().keys())
+        
+        # Find extra tokens in student vocabulary
+        extra_tokens = student_vocab - teacher_vocab
+        logger.info(f"\nVocabulary Analysis:")
+        logger.info(f"Teacher vocab size: {len(teacher_vocab)}")
+        logger.info(f"Student vocab size: {len(student_vocab)}")
+        logger.info(f"Extra tokens in student vocab ({len(extra_tokens)}):")
+        for token in sorted(extra_tokens):
+            token_id = student_tokenizer.get_vocab()[token]
+            logger.info(f"Token: {repr(token)}, ID: {token_id}")
+        
+        # Use teacher tokenizer for everything
+        self.tokenizer = teacher_tokenizer
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -217,6 +236,18 @@ class MultiTeacherDistillation:
             teacher2_logits = teacher2_outputs.logits / self.temperature
             student_logits = student_outputs.logits / self.temperature
 
+            # Get the minimum vocabulary size
+            min_vocab_size = min(
+                teacher1_logits.size(-1),
+                teacher2_logits.size(-1),
+                student_logits.size(-1)
+            )
+
+            # Truncate logits to the same vocabulary size
+            teacher1_logits = teacher1_logits[..., :min_vocab_size]
+            teacher2_logits = teacher2_logits[..., :min_vocab_size]
+            student_logits = student_logits[..., :min_vocab_size]
+
             # Convert to probability distributions
             teacher1_probs = F.softmax(teacher1_logits, dim=-1)
             teacher2_probs = F.softmax(teacher2_logits, dim=-1)
@@ -246,13 +277,13 @@ class MultiTeacherDistillation:
                 log_target=False
             ) * (self.temperature ** 2)
 
-            # Compute weighted distillation loss # naturally we would want to put more weight on the more confident teacher
+            # Compute weighted distillation loss
             distill_loss = (teacher1_weight * kl_loss_teacher1 + 
                           teacher2_weight * kl_loss_teacher2)
 
             # Compute cross-entropy loss with ground truth (next token prediction)
-            shift_logits = student_outputs.logits[:, :-1, :].contiguous()
-            shift_labels = input_ids[:, 1:].contiguous()
+            shift_logits = student_logits[:, :-1, :]
+            shift_labels = input_ids[:, 1:].clamp(max=min_vocab_size-1)  # Clamp labels to valid range
             ce_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1)
