@@ -5,10 +5,28 @@ from pathlib import Path
 from train import CodeSearchNetDataset
 from transformers import AutoTokenizer
 import logging
-import wandb
+import csv
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def write_metrics(metrics_file, metrics_dict, epoch=None, batch=None):
+    """Write metrics to CSV file."""
+    # Create file with headers if it doesn't exist
+    if not Path(metrics_file).exists():
+        with open(metrics_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            headers = ['timestamp', 'epoch', 'batch']
+            headers.extend(metrics_dict.keys())
+            writer.writerow(headers)
+    
+    # Append metrics
+    with open(metrics_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        row = [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), epoch, batch]
+        row.extend(metrics_dict.values())
+        writer.writerow(row)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train with CodeSearchNet dataset")
@@ -65,15 +83,13 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Initialize wandb for experiment tracking
-    wandb.init(
-        project="code-distillation",
-        config=vars(args)
-    )
-    
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create metrics files
+    train_metrics_file = output_dir / 'train_metrics.csv'
+    val_metrics_file = output_dir / 'val_metrics.csv'
     
     # Initialize distillation framework
     from train import MultiTeacherDistillation
@@ -133,11 +149,13 @@ def main():
             
             if batch_idx % 100 == 0:
                 logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Batch {batch_idx}/{len(train_loader)}, Loss: {loss:.4f}")
-                wandb.log({
-                    "train_batch_loss": loss,
-                    "epoch": epoch,
-                    "batch": batch_idx
-                })
+                # Log batch metrics
+                write_metrics(
+                    train_metrics_file,
+                    {'loss': f"{loss:.4f}"},
+                    epoch=epoch+1,
+                    batch=batch_idx
+                )
         
         avg_train_loss = total_train_loss / len(train_loader)
         
@@ -146,21 +164,24 @@ def main():
         total_val_loss = 0
         with torch.no_grad():
             for batch in val_loader:
-                loss = distiller.train_step(batch)  # Using train_step but in eval mode
+                loss = distiller.train_step(batch)
                 total_val_loss += loss
         
         avg_val_loss = total_val_loss / len(val_loader)
         
-        # Log metrics
+        # Log epoch metrics
         logger.info(f"Epoch {epoch+1}/{args.num_epochs}")
         logger.info(f"Average Train Loss: {avg_train_loss:.4f}")
         logger.info(f"Average Val Loss: {avg_val_loss:.4f}")
         
-        wandb.log({
-            "train_epoch_loss": avg_train_loss,
-            "val_epoch_loss": avg_val_loss,
-            "epoch": epoch
-        })
+        write_metrics(
+            val_metrics_file,
+            {
+                'train_loss': f"{avg_train_loss:.4f}",
+                'val_loss': f"{avg_val_loss:.4f}"
+            },
+            epoch=epoch+1
+        )
         
         # Save checkpoint if validation loss improved
         if avg_val_loss < best_val_loss:

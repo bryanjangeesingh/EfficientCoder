@@ -26,7 +26,6 @@ nvidia-smi
 echo "Setting up Python environment..."
 export CUDA_VISIBLE_DEVICES=0,1,2,3  # Use all 4 GPUs
 export TOKENIZERS_PARALLELISM=true
-export WANDB_PROJECT="code-distillation"
 
 # Launch training
 echo "Launching training..."
