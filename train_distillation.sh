@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-DATA_PATH="/path/to/codesearchnet"  # Update this path
+DATA_PATH="/nobackup/users/brytech/codesearchnet"  # Update this path
 OUTPUT_DIR="./outputs/distillation_$(date +%Y%m%d_%H%M%S)"
 BATCH_SIZE=32
 NUM_EPOCHS=10
