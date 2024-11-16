@@ -15,6 +15,9 @@ import torch.distributed as dist
 import json
 from pathlib import Path
 import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CodeSearchNetDataset(Dataset):
     def __init__(
@@ -47,10 +50,20 @@ class CodeSearchNetDataset(Dataset):
             if not lang_path.exists():
                 raise ValueError(f"Path not found: {lang_path}")
             
-            # Load train.jsonl
-            train_file = lang_path / "train.jsonl"
-            with open(train_file) as f:
-                lang_samples = [json.loads(line) for line in f]
+            # Find all training files (they might be split into multiple parts)
+            train_files = list(lang_path.glob("python_train_*.jsonl"))
+            if not train_files:
+                raise ValueError(f"No training files found in {lang_path}")
+            
+            logger.info(f"Found {len(train_files)} training files for {lang}")
+            
+            # Load all training files
+            lang_samples = []
+            for train_file in train_files:
+                with open(train_file) as f:
+                    file_samples = [json.loads(line) for line in f]
+                    lang_samples.extend(file_samples)
+                    logger.info(f"Loaded {len(file_samples)} samples from {train_file.name}")
             
             # Filter out samples with empty or invalid code
             lang_samples = [
@@ -58,14 +71,18 @@ class CodeSearchNetDataset(Dataset):
                 if sample["code"] and len(sample["code"].strip()) > 0
             ]
             
+            logger.info(f"Total valid samples for {lang}: {len(lang_samples)}")
+            
             # Limit samples if specified
             if max_samples_per_language:
                 lang_samples = lang_samples[:max_samples_per_language]
+                logger.info(f"Limited to {len(lang_samples)} samples for {lang}")
             
             self.samples.extend(lang_samples)
         
         # Shuffle the samples
         random.shuffle(self.samples)
+        logger.info(f"Final dataset size: {len(self.samples)} samples")
 
     def __len__(self):
         return len(self.samples)
