@@ -164,7 +164,7 @@ def main():
             # Forward and backward pass
             loss = distiller.train_step(batch)
             loss = loss / args.gradient_accumulation_steps  # Scale loss
-            total_train_loss += loss.item() * args.gradient_accumulation_steps
+            total_train_loss += loss  # loss is already a float
             
             # Backward pass with gradient accumulation
             distiller.accelerator.backward(loss)
@@ -176,14 +176,14 @@ def main():
             
             # Update progress bar
             train_pbar.set_postfix({
-                "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
+                "Loss": f"{loss * args.gradient_accumulation_steps:.4f}",
                 "Acc Step": f"{(batch_idx + 1) % args.gradient_accumulation_steps}/{args.gradient_accumulation_steps}"
             })
             
             if batch_idx % 100 == 0:
                 write_metrics(
                     train_metrics_file,
-                    {'loss': f"{loss.item() * args.gradient_accumulation_steps:.4f}"},
+                    {'loss': f"{loss * args.gradient_accumulation_steps:.4f}"},
                     epoch=epoch+1,
                     batch=batch_idx
                 )
@@ -204,12 +204,12 @@ def main():
         )
         
         with torch.no_grad():
-            for batch in val_pbar:
+            for batch_idx, batch in enumerate(val_pbar):
                 loss = distiller.train_step(batch)  # Using train_step but in eval mode
-                total_val_loss += loss
+                total_val_loss += loss.item()  # Get the loss value as a float
                 
                 # Update progress bar with current loss
-                val_pbar.set_postfix({"Loss": f"{loss:.4f}"})
+                val_pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
         
         avg_val_loss = total_val_loss / len(val_loader)
         logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Validation Loss: {avg_val_loss:.4f}")
