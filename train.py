@@ -11,7 +11,8 @@ from sentence_transformers import SentenceTransformer
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import List, Tuple, Dict
-
+from accelerate import Accelerator
+import torch.distributed as dist
 
 class CodeDistillationDataset(Dataset):
     def __init__(self, code_samples: List[str], tokenizer, max_length: int = 512):
@@ -41,38 +42,63 @@ class CodeDistillationDataset(Dataset):
 class MultiTeacherDistillation:
     def __init__(
         self,
-        student_model_name: str,
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.device = device
         self.temperature = temperature
+        
+        # Initialize accelerator for distributed training
+        self.accelerator = Accelerator()
+        
+        # Configure model loading with optimal settings for V100s
+        model_kwargs = {
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+            "max_memory": {i: "28GB" for i in range(torch.cuda.device_count())},  # Reserve some memory for gradients
+            "offload_folder": "offload_folder",  # For potential CPU offloading if needed
+        }
 
-        # Initialize models
+        # Initialize models with distributed setup
         self.code_llama = AutoModelForCausalLM.from_pretrained(
-            "codellama/CodeLlama-7b-hf", torch_dtype=torch.float16, device_map="auto"
+            "codellama/CodeLlama-34b-hf",
+            **model_kwargs
         )
+        
+        # Initialize CodeT5p-2B with memory optimizations
         self.code_t5 = T5ForConditionalGeneration.from_pretrained(
-            "Salesforce/codet5-base"
-        ).to(device)
+            "Salesforce/codet5p-2b",
+            torch_dtype=torch.float16,
+            device_map="auto",
+            max_memory={i: "24GB" for i in range(torch.cuda.device_count())},  # Reserve memory for other models
+        )
 
-        # Initialize student model (smaller Code Llama)
+        # Initialize student model (3B distilled CodeLlama)
+        student_model_name = "anudaw/distilled-code-llama"
         self.student = AutoModelForCausalLM.from_pretrained(
-            student_model_name, torch_dtype=torch.float16, device_map="auto"
+            student_model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            max_memory={i: "8GB" for i in range(torch.cuda.device_count())},  # Smaller memory footprint for 3B model
         )
 
         # Initialize tokenizers
         self.llama_tokenizer = AutoTokenizer.from_pretrained(
-            "codellama/CodeLlama-7b-hf"
+            "codellama/CodeLlama-34b-hf"
         )
-        self.t5_tokenizer = AutoTokenizer.from_pretrained("Salesforce/codet5-base")
+        self.t5_tokenizer = AutoTokenizer.from_pretrained("Salesforce/codet5p-2b")
         self.student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
 
         # Initialize sentence embedder for alignment
         self.sentence_embedder = SentenceTransformer("all-MiniLM-L6-v2").to(device)
 
-        # Initialize optimizer
+        # Initialize optimizer with gradient accumulation
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
+        
+        # Prepare for distributed training
+        self.student, self.optimizer, self.code_t5 = self.accelerator.prepare(
+            self.student, self.optimizer, self.code_t5
+        )
 
     def get_embeddings(self, text: str) -> torch.Tensor:
         """Convert text to embeddings using sentence transformer."""
@@ -181,7 +207,7 @@ class MultiTeacherDistillation:
             total_loss += combined_loss
 
         avg_loss = total_loss / batch_size
-        avg_loss.backward()
+        self.accelerator.backward(avg_loss)
         self.optimizer.step()
 
         return avg_loss.item()
