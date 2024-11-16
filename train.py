@@ -145,7 +145,7 @@ class MultiTeacherDistillation:
         self.device = device
         self.temperature = temperature
         self.teacher1_model_name = teacher1_model_name
-        self.teacher2_model_name = teacher2_model_name
+        self.teacher2_model_name = teacher2_model_name  
         self.student_model_name = student_model_name
         
         # Initialize accelerator for distributed training
