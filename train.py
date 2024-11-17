@@ -153,46 +153,20 @@ class MultiTeacherDistillation:
             mixed_precision="fp16",  # Use mixed precision for better speed
         )
         
-        # Configure model loading with explicit device mapping
+        # Configure model loading with explicit GPU assignments
         teacher_kwargs = {
             "torch_dtype": torch.float16,  # Use FP16 for teacher (inference only)
-            "device_map": {
-                "model.embed_tokens": 0,
-                "model.layers.0": 0,
-                "model.layers.1": 0,
-                "model.layers.2": 0,
-                "model.layers.3": 0,
-                "model.layers.4": 1,
-                "model.layers.5": 1,
-                "model.layers.6": 1,
-                "model.layers.7": 1,
-                "model.layers.8": 1,
-                "model.layers.9": 1,
-                "model.layers.10": 1,
-                "model.norm": 1,
-                "lm_head": 1,
-            },
+            "device_map": {"": 0},  # Put entire teacher on GPU 0
             "use_cache": False,
         }
         
         student_kwargs = {
             "torch_dtype": torch.float16,  # Use FP16 for student
-            "device_map": {
-                "model.embed_tokens": 2,
-                "model.layers.0": 2,
-                "model.layers.1": 2,
-                "model.layers.2": 2,
-                "model.layers.3": 2,
-                "model.layers.4": 3,
-                "model.layers.5": 3,
-                "model.layers.6": 3,
-                "model.norm": 3,
-                "lm_head": 3,
-            },
+            "device_map": {"": 1},  # Put entire student on GPU 1
             "use_cache": False,
         }
 
-        logger.info("Loading teacher (13B) on GPUs 0,1...")
+        logger.info("Loading teacher (13B) on GPU 0...")
         self.teacher = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
@@ -200,7 +174,7 @@ class MultiTeacherDistillation:
         )
         self.teacher.gradient_checkpointing_enable()
         
-        logger.info("Loading student model (7B) on GPUs 2,3...")
+        logger.info("Loading student model (7B) on GPU 1...")
         self.student = AutoModelForCausalLM.from_pretrained(
             self.student_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
