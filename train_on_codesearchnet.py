@@ -95,6 +95,12 @@ def parse_args():
         help="Gradient accumulation steps"
     )
     parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="Number of workers for data loading"
+    )
+    parser.add_argument(
         "--eval",
         action="store_true",
         help="Evaluate the model during training"
@@ -114,9 +120,10 @@ def main():
     # Initialize the distiller
     from train import MultiTeacherDistillation
     distiller = MultiTeacherDistillation(
-        teacher1_model_name="codellama/CodeLlama-13b-hf",
+        teacher1_model_name="codellama/CodeLlama-7b-Instruct-hf",
         student_model_name="codellama/CodeLlama-7b-hf",
-        temperature=args.temperature
+        temperature=args.temperature,
+        num_workers=args.num_workers
     )
     
     # Create datasets
@@ -146,7 +153,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=CodeSearchNetDataset.collate_fn,
-        num_workers=4,
+        num_workers=args.num_workers,
         pin_memory=True
     )
     
@@ -155,7 +162,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=CodeSearchNetDataset.collate_fn,
-        num_workers=4,
+        num_workers=args.num_workers,
         pin_memory=True
     )
     
