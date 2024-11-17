@@ -238,19 +238,20 @@ class MultiTeacherDistillation:
             logger.info("Starting train_step")
             self.optimizer.zero_grad()
             
-            # Move entire batch to device at once
-            input_ids = input_batch["input_ids"].to(self.device)
-            batch_size = input_ids.shape[0]
+            # Move input tensors to appropriate devices
+            teacher_input_ids = input_batch["input_ids"].to("cuda:0")
+            student_input_ids = input_batch["input_ids"].to("cuda:1")
+            batch_size = teacher_input_ids.shape[0]
             logger.info(f"Processing batch of size {batch_size}")
             
             # Get teacher outputs for entire batch
             logger.info("Getting teacher outputs")
             with torch.no_grad():
-                teacher_outputs = self.teacher(input_ids)
+                teacher_outputs = self.teacher(teacher_input_ids)
             
             # Get student outputs for entire batch
             logger.info("Getting student outputs")
-            student_outputs = self.student(input_ids)
+            student_outputs = self.student(student_input_ids)
 
             # Apply stable scaling to logits
             logger.info("Computing logits and probabilities")
@@ -259,7 +260,8 @@ class MultiTeacherDistillation:
                 logits = torch.clamp(logits, -max_value, max_value)
                 return logits / (temp + 1e-8)
 
-            teacher_logits = scale_logits(teacher_outputs.logits, self.temperature)
+            # Move teacher logits to student device for loss computation
+            teacher_logits = scale_logits(teacher_outputs.logits.to("cuda:1"), self.temperature)
             student_logits = scale_logits(student_outputs.logits, self.temperature)
 
             # Compute probabilities with numerical stability
@@ -274,7 +276,7 @@ class MultiTeacherDistillation:
             logger.info("Computing losses")
             # Compute cross-entropy loss
             shift_logits = student_outputs.logits[:, :-1, :].contiguous()
-            shift_labels = input_ids[:, 1:].contiguous()
+            shift_labels = student_input_ids[:, 1:].contiguous()
             
             # Add label smoothing
             smoothing = 0.1
@@ -290,7 +292,7 @@ class MultiTeacherDistillation:
 
             if torch.isnan(ce_loss):
                 logger.error("NaN detected in CE loss, skipping batch")
-                return torch.tensor(0.0, device=self.device, requires_grad=True)
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
 
             # Compute KL divergence with stability measures
             kl_loss = F.kl_div(
@@ -313,7 +315,7 @@ class MultiTeacherDistillation:
                     f"CE Loss: {ce_loss.item():.4f}\n"
                     f"KL Loss: {kl_loss.item():.4f}"
                 )
-                return torch.tensor(0.0, device=self.device, requires_grad=True)
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
             
             logger.info(f"Final loss: {combined_loss.item():.4f}")
             
