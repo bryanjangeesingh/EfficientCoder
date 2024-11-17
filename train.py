@@ -206,8 +206,7 @@ class MultiTeacherDistillation:
         self.optimizer = torch.optim.AdamW(
             param_groups,
             eps=1e-8,
-            betas=(0.9, 0.999),  # Standard betas for better stability
-            fused=True  # Use fused Adam for better numerical precision
+            betas=(0.9, 0.999)  # Standard betas for better stability
         )
         
         # Add gradient clipping
