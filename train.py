@@ -138,7 +138,7 @@ class MultiTeacherDistillation:
         self,
         teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
         teacher2_model_name: str = "codellama/CodeLlama-7b-Instruct-hf",  # Instruct version
-        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
+        student_model_name: str = "anudaw/distilled-code-llama",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
