@@ -136,7 +136,7 @@ class CodeSearchNetDataset(Dataset):
 class MultiTeacherDistillation:
     def __init__(
         self,
-        teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
+        teacher1_model_name: str = "codellama/CodeLlama-7b-Instruct-hf",      # use the instruct model
         student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
