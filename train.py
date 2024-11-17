@@ -398,41 +398,43 @@ class MultiTeacherDistillation:
             
             progress_bar = tqdm(
                 total=len(train_loader),
-                desc=f"Epoch {epoch + 1}/{num_epochs} [Train]",
-                dynamic_ncols=True
+                desc=f"E{epoch + 1}/{num_epochs}",
+                dynamic_ncols=True,
+                mininterval=2.0,
+                miniters=10
             )
             
-            # Process batches with prefetching
             for batch in train_loader:
                 loss = self.train_step(batch)
                 total_loss += loss.item()
                 num_batches += 1
                 
-                # Update progress bar with current loss
-                progress_bar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'avg_loss': f'{(total_loss / num_batches):.4f}'
-                })
-                progress_bar.update(1)
+                if num_batches % 10 == 0:
+                    progress_bar.set_postfix({'l': f'{(total_loss / num_batches):.3f}'})
+                    progress_bar.update(10)
                 
-                # Clear GPU cache periodically
                 if num_batches % 100 == 0:
                     torch.cuda.empty_cache()
             
             progress_bar.close()
-            
-            # Log epoch metrics
             avg_loss = total_loss / num_batches
-            logger.info(f"Epoch {epoch + 1}/{num_epochs} - Average Loss: {avg_loss:.4f}")
             
             # Evaluate if dataset provided
             if eval_dataset is not None:
                 eval_loss = self.evaluate(eval_dataset, batch_size)
-                logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval Loss: {eval_loss:.4f}")
-                
-            # Save checkpoint
-            if (epoch + 1) % 5 == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
+                print(f"E{epoch + 1}: train={avg_loss:.3f}, eval={eval_loss:.3f}")
+            else:
+                print(f"E{epoch + 1}: train={avg_loss:.3f}")
+            
+            # Save checkpoint after each epoch
+            checkpoint = {
+                "student_state_dict": self.student.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "epoch": epoch + 1,
+                "train_loss": avg_loss
+            }
+            torch.save(checkpoint, f"checkpoint_epoch_{epoch + 1}.pt")
                 
     def evaluate(self, eval_dataset: CodeSearchNetDataset, batch_size: int):
         """Evaluate the student model."""
