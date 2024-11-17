@@ -111,10 +111,12 @@ def main():
     train_metrics_file = output_dir / 'train_metrics.csv'
     val_metrics_file = output_dir / 'val_metrics.csv'
     
-    # Initialize distillation framework
+    # Initialize the distiller
     from train import MultiTeacherDistillation
     distiller = MultiTeacherDistillation(
-        temperature=args.temperature,
+        teacher1_model_name="codellama/CodeLlama-13b-hf",
+        student_model_name="codellama/CodeLlama-7b-hf",
+        temperature=args.temperature
     )
     
     # Create datasets

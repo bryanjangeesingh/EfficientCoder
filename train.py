@@ -137,8 +137,7 @@ class MultiTeacherDistillation:
     def __init__(
         self,
         teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
-        teacher2_model_name: str = "codellama/CodeLlama-7b-Instruct-hf",  # Instruct version
-        student_model_name: str = "anudaw/distilled-code-llama",        # Base student model
+        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
@@ -146,10 +145,9 @@ class MultiTeacherDistillation:
         self.device = device
         self.temperature = temperature
         self.teacher1_model_name = teacher1_model_name
-        self.teacher2_model_name = teacher2_model_name  
         self.student_model_name = student_model_name
         
-        # Initialize accelerator with gradient accumulation
+        # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=8
         )
@@ -161,21 +159,13 @@ class MultiTeacherDistillation:
             "use_cache": False,
         }
 
-        logger.info("Loading teacher1 (13B) on GPU...")
-        self.teacher1 = AutoModelForCausalLM.from_pretrained(
+        logger.info("Loading teacher (13B) on GPU...")
+        self.teacher = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
             **model_kwargs
         )
-        self.teacher1.gradient_checkpointing_enable()
-        
-        logger.info("Loading teacher2 instruct (13B) on GPU...")
-        self.teacher2 = AutoModelForCausalLM.from_pretrained(
-            self.teacher2_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_7b_instruct",
-            **model_kwargs
-        )
-        self.teacher2.gradient_checkpointing_enable()
+        self.teacher.gradient_checkpointing_enable()
         
         logger.info("Loading student model (7B) on GPU...")
         self.student = AutoModelForCausalLM.from_pretrained(
@@ -226,7 +216,7 @@ class MultiTeacherDistillation:
         )
 
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Perform one training step with multi-teacher distillation."""
+        """Perform one training step with single teacher distillation."""
         try:
             logger.info("Starting train_step")
             self.optimizer.zero_grad()
@@ -237,26 +227,9 @@ class MultiTeacherDistillation:
             logger.info(f"Processing batch of size {batch_size}")
             
             # Get teacher outputs for entire batch
-            logger.info("Getting teacher1 outputs")
+            logger.info("Getting teacher outputs")
             with torch.no_grad():
-                teacher1_outputs = self.teacher1(input_ids)
-                
-                # Format input with instruction for teacher2
-                logger.info("Getting teacher2 outputs")
-                code_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-                instruct_prompts = [
-                    f"[INST] Generate a Python function:\n{text} [/INST]"
-                    for text in code_texts
-                ]
-                instruct_inputs = self.tokenizer(
-                    instruct_prompts,
-                    return_tensors="pt",
-                    padding='max_length',
-                    truncation=True,
-                    max_length=input_ids.shape[1]
-                ).input_ids.to(self.device)
-                
-                teacher2_outputs = self.teacher2(instruct_inputs)
+                teacher_outputs = self.teacher(input_ids)
             
             # Get student outputs for entire batch
             logger.info("Getting student outputs")
@@ -269,8 +242,7 @@ class MultiTeacherDistillation:
                 logits = torch.clamp(logits, -max_value, max_value)
                 return logits / (temp + 1e-8)
 
-            teacher1_logits = scale_logits(teacher1_outputs.logits, self.temperature)
-            teacher2_logits = scale_logits(teacher2_outputs.logits, self.temperature)
+            teacher_logits = scale_logits(teacher_outputs.logits, self.temperature)
             student_logits = scale_logits(student_outputs.logits, self.temperature)
 
             # Compute probabilities with numerical stability
@@ -279,8 +251,7 @@ class MultiTeacherDistillation:
                 probs = torch.clamp(probs, min=1e-8, max=1.0)
                 return probs / probs.sum(dim=-1, keepdim=True)
 
-            teacher1_probs = compute_probs(teacher1_logits)
-            teacher2_probs = compute_probs(teacher2_logits)
+            teacher_probs = compute_probs(teacher_logits)
             student_log_probs = F.log_softmax(student_logits, dim=-1)
 
             logger.info("Computing losses")
@@ -305,53 +276,25 @@ class MultiTeacherDistillation:
                 return torch.tensor(0.0, device=self.device, requires_grad=True)
 
             # Compute KL divergence with stability measures
-            def stable_kl_div(student_log_probs, teacher_probs):
-                kl_div = F.kl_div(
-                    student_log_probs,
-                    teacher_probs,
-                    reduction='batchmean',
-                    log_target=False
-                )
-                return torch.clamp(kl_div, max=10.0)
-
-            # Compute teacher weights based on confidence
-            def compute_teacher_weight(probs):
-                confidence = torch.max(probs, dim=-1)[0].mean()
-                return torch.clamp(confidence, min=0.1, max=0.9)
-
-            teacher1_weight = compute_teacher_weight(teacher1_probs)
-            teacher2_weight = compute_teacher_weight(teacher2_probs)
-            
-            # Normalize weights
-            total_weight = teacher1_weight + teacher2_weight
-            teacher1_weight = teacher1_weight / total_weight
-            teacher2_weight = teacher2_weight / total_weight
-
-            # Compute distillation losses
-            kl_loss1 = stable_kl_div(student_log_probs, teacher1_probs)
-            kl_loss2 = stable_kl_div(student_log_probs, teacher2_probs)
-            
-            distill_loss = (teacher1_weight * kl_loss1 + teacher2_weight * kl_loss2)
-
-            # Compute consistency loss with reduced weight
-            consistency_loss = stable_kl_div(
-                F.log_softmax(teacher1_logits, dim=-1),
-                F.softmax(teacher2_logits, dim=-1)
-            ) * 0.05
+            kl_loss = F.kl_div(
+                student_log_probs,
+                teacher_probs,
+                reduction='batchmean',
+                log_target=False
+            )
+            kl_loss = torch.clamp(kl_loss, max=10.0)
 
             # Combine losses with careful weighting
             combined_loss = (
                 0.5 * ce_loss +
-                0.45 * distill_loss +
-                0.05 * consistency_loss
+                0.5 * kl_loss  # Equal weight between CE and KL since we only have one teacher
             )
             
             if torch.isnan(combined_loss):
                 logger.warning(
                     f"NaN detected in loss computation:\n"
                     f"CE Loss: {ce_loss.item():.4f}\n"
-                    f"Distill Loss: {distill_loss.item():.4f}\n"
-                    f"Consistency Loss: {consistency_loss.item():.4f}"
+                    f"KL Loss: {kl_loss.item():.4f}"
                 )
                 return torch.tensor(0.0, device=self.device, requires_grad=True)
             
