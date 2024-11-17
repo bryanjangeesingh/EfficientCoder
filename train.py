@@ -137,7 +137,7 @@ class MultiTeacherDistillation:
     def __init__(
         self,
         teacher1_model_name: str = "codellama/CodeLlama-13b-hf",        # General CodeLlama-13B
-        teacher2_model_name: str = "codellama/CodeLlama-13b-Instruct-hf",  # Instruct version
+        teacher2_model_name: str = "codellama/CodeLlama-7b-Instruct-hf",  # Instruct version
         student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -172,7 +172,7 @@ class MultiTeacherDistillation:
         logger.info("Loading teacher2 instruct (13B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
             self.teacher2_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_7b_instruct",
             **model_kwargs
         )
         self.teacher2.gradient_checkpointing_enable()
