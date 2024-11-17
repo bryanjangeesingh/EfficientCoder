@@ -227,136 +227,151 @@ class MultiTeacherDistillation:
 
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Perform one training step with multi-teacher distillation."""
-        self.optimizer.zero_grad()
-        total_loss = 0
-        batch_size = input_batch["input_ids"].shape[0]
+        try:
+            logger.info("Starting train_step")
+            self.optimizer.zero_grad()
+            total_loss = 0
+            batch_size = input_batch["input_ids"].shape[0]
+            logger.info(f"Processing batch of size {batch_size}")
 
-        for i in range(batch_size):
-            input_ids = input_batch["input_ids"][i].unsqueeze(0).to(self.device)
-            
-            # Get teacher outputs with gradient disabled
-            with torch.no_grad():
-                teacher1_outputs = self.teacher1(input_ids)
+            for i in range(batch_size):
+                logger.info(f"Processing item {i} in batch")
+                input_ids = input_batch["input_ids"][i].unsqueeze(0).to(self.device)
                 
-                # Format input with instruction for teacher2
-                code_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
-                instruct_prompt = f"[INST] Generate a Python function:\n{code_text} [/INST]"
-                instruct_inputs = self.tokenizer(
-                    instruct_prompt,
-                    return_tensors="pt",
-                    padding='max_length',
-                    truncation=True,
-                    max_length=input_ids.shape[1]
-                ).input_ids.to(self.device)
+                # Get teacher outputs with gradient disabled
+                logger.info("Getting teacher1 outputs")
+                with torch.no_grad():
+                    teacher1_outputs = self.teacher1(input_ids)
+                    
+                    # Format input with instruction for teacher2
+                    logger.info("Getting teacher2 outputs")
+                    code_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    instruct_prompt = f"[INST] Generate a Python function:\n{code_text} [/INST]"
+                    instruct_inputs = self.tokenizer(
+                        instruct_prompt,
+                        return_tensors="pt",
+                        padding='max_length',
+                        truncation=True,
+                        max_length=input_ids.shape[1]
+                    ).input_ids.to(self.device)
+                    
+                    teacher2_outputs = self.teacher2(instruct_inputs)
                 
-                teacher2_outputs = self.teacher2(instruct_inputs)
-            
-            # Get student outputs
-            student_outputs = self.student(input_ids)
+                logger.info("Getting student outputs")
+                # Get student outputs
+                student_outputs = self.student(input_ids)
 
-            # Apply stable scaling to logits
-            def scale_logits(logits, temp=1.0, max_value=10.0):
-                # Center logits for better numerical stability
-                logits = logits - logits.mean(dim=-1, keepdim=True)
-                # Clip extreme values
-                logits = torch.clamp(logits, -max_value, max_value)
-                # Scale by temperature
-                return logits / (temp + 1e-8)  # Add epsilon to prevent division by zero
+                # Apply stable scaling to logits
+                logger.info("Computing logits and probabilities")
+                def scale_logits(logits, temp=1.0, max_value=10.0):
+                    logits = logits - logits.mean(dim=-1, keepdim=True)
+                    logits = torch.clamp(logits, -max_value, max_value)
+                    return logits / (temp + 1e-8)
 
-            teacher1_logits = scale_logits(teacher1_outputs.logits, self.temperature)
-            teacher2_logits = scale_logits(teacher2_outputs.logits, self.temperature)
-            student_logits = scale_logits(student_outputs.logits, self.temperature)
+                teacher1_logits = scale_logits(teacher1_outputs.logits, self.temperature)
+                teacher2_logits = scale_logits(teacher2_outputs.logits, self.temperature)
+                student_logits = scale_logits(student_outputs.logits, self.temperature)
 
-            # Compute probabilities with numerical stability
-            def compute_probs(logits):
-                # Add small epsilon to prevent log(0)
-                probs = F.softmax(logits, dim=-1)
-                probs = torch.clamp(probs, min=1e-8, max=1.0)
-                return probs / probs.sum(dim=-1, keepdim=True)  # Renormalize
+                # Compute probabilities with numerical stability
+                def compute_probs(logits):
+                    probs = F.softmax(logits, dim=-1)
+                    probs = torch.clamp(probs, min=1e-8, max=1.0)
+                    return probs / probs.sum(dim=-1, keepdim=True)
 
-            teacher1_probs = compute_probs(teacher1_logits)
-            teacher2_probs = compute_probs(teacher2_logits)
-            student_log_probs = F.log_softmax(student_logits, dim=-1)
+                teacher1_probs = compute_probs(teacher1_logits)
+                teacher2_probs = compute_probs(teacher2_logits)
+                student_log_probs = F.log_softmax(student_logits, dim=-1)
 
-            # Compute cross-entropy loss first
-            shift_logits = student_outputs.logits[:, :-1, :].contiguous()
-            shift_labels = input_ids[:, 1:].contiguous()
-            
-            # Add label smoothing
-            smoothing = 0.1
-            n_class = shift_logits.size(-1)
-            one_hot = torch.zeros_like(shift_logits).scatter(
-                2, shift_labels.unsqueeze(-1), 1-smoothing
-            )
-            one_hot = one_hot + smoothing/n_class
-            
-            # Compute CE loss with label smoothing
-            log_probs = F.log_softmax(shift_logits, dim=-1)
-            ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
-
-            if torch.isnan(ce_loss):
-                logger.warning("NaN detected in CE loss, skipping batch")
-                return torch.tensor(0.0, device=self.device, requires_grad=True)
-
-            # Compute KL divergence with stability measures
-            def stable_kl_div(student_log_probs, teacher_probs):
-                kl_div = F.kl_div(
-                    student_log_probs,
-                    teacher_probs,
-                    reduction='batchmean',
-                    log_target=False
+                logger.info("Computing losses")
+                # Compute cross-entropy loss first
+                shift_logits = student_outputs.logits[:, :-1, :].contiguous()
+                shift_labels = input_ids[:, 1:].contiguous()
+                
+                # Add label smoothing
+                smoothing = 0.1
+                n_class = shift_logits.size(-1)
+                one_hot = torch.zeros_like(shift_logits).scatter(
+                    2, shift_labels.unsqueeze(-1), 1-smoothing
                 )
-                return torch.clamp(kl_div, max=10.0)  # Prevent extreme values
+                one_hot = one_hot + smoothing/n_class
+                
+                # Compute CE loss with label smoothing
+                log_probs = F.log_softmax(shift_logits, dim=-1)
+                ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
 
-            # Compute teacher weights based on confidence
-            def compute_teacher_weight(probs):
-                confidence = torch.max(probs, dim=-1)[0].mean()
-                return torch.clamp(confidence, min=0.1, max=0.9)  # Bound weights
+                if torch.isnan(ce_loss):
+                    logger.error("NaN detected in CE loss, skipping batch")
+                    return torch.tensor(0.0, device=self.device, requires_grad=True)
 
-            teacher1_weight = compute_teacher_weight(teacher1_probs)
-            teacher2_weight = compute_teacher_weight(teacher2_probs)
-            
-            # Normalize weights
-            total_weight = teacher1_weight + teacher2_weight
-            teacher1_weight = teacher1_weight / total_weight
-            teacher2_weight = teacher2_weight / total_weight
+                # Compute KL divergence with stability measures
+                def stable_kl_div(student_log_probs, teacher_probs):
+                    kl_div = F.kl_div(
+                        student_log_probs,
+                        teacher_probs,
+                        reduction='batchmean',
+                        log_target=False
+                    )
+                    return torch.clamp(kl_div, max=10.0)
 
-            # Compute distillation losses
-            kl_loss1 = stable_kl_div(student_log_probs, teacher1_probs)
-            kl_loss2 = stable_kl_div(student_log_probs, teacher2_probs)
-            
-            distill_loss = (teacher1_weight * kl_loss1 + teacher2_weight * kl_loss2)
+                # Compute teacher weights based on confidence
+                def compute_teacher_weight(probs):
+                    confidence = torch.max(probs, dim=-1)[0].mean()
+                    return torch.clamp(confidence, min=0.1, max=0.9)
 
-            # Compute consistency loss with reduced weight
-            consistency_loss = stable_kl_div(
-                F.log_softmax(teacher1_logits, dim=-1),
-                F.softmax(teacher2_logits, dim=-1)
-            ) * 0.05  # Very small weight for consistency
+                teacher1_weight = compute_teacher_weight(teacher1_probs)
+                teacher2_weight = compute_teacher_weight(teacher2_probs)
+                
+                # Normalize weights
+                total_weight = teacher1_weight + teacher2_weight
+                teacher1_weight = teacher1_weight / total_weight
+                teacher2_weight = teacher2_weight / total_weight
 
-            # Combine losses with careful weighting
-            combined_loss = (
-                0.5 * ce_loss +  # Higher weight on CE loss
-                0.45 * distill_loss +  # Moderate weight on distillation
-                0.05 * consistency_loss  # Small weight on consistency
-            )
-            
-            if torch.isnan(combined_loss):
-                logger.warning(
-                    f"NaN detected in loss computation:\n"
-                    f"CE Loss: {ce_loss.item():.4f}\n"
-                    f"Distill Loss: {distill_loss.item():.4f}\n"
-                    f"Consistency Loss: {consistency_loss.item():.4f}"
+                # Compute distillation losses
+                kl_loss1 = stable_kl_div(student_log_probs, teacher1_probs)
+                kl_loss2 = stable_kl_div(student_log_probs, teacher2_probs)
+                
+                distill_loss = (teacher1_weight * kl_loss1 + teacher2_weight * kl_loss2)
+
+                # Compute consistency loss with reduced weight
+                consistency_loss = stable_kl_div(
+                    F.log_softmax(teacher1_logits, dim=-1),
+                    F.softmax(teacher2_logits, dim=-1)
+                ) * 0.05
+
+                # Combine losses with careful weighting
+                combined_loss = (
+                    0.5 * ce_loss +
+                    0.45 * distill_loss +
+                    0.05 * consistency_loss
                 )
-                return torch.tensor(0.0, device=self.device, requires_grad=True)
-            
-            total_loss += combined_loss
+                
+                if torch.isnan(combined_loss):
+                    logger.warning(
+                        f"NaN detected in loss computation:\n"
+                        f"CE Loss: {ce_loss.item():.4f}\n"
+                        f"Distill Loss: {distill_loss.item():.4f}\n"
+                        f"Consistency Loss: {consistency_loss.item():.4f}"
+                    )
+                    return torch.tensor(0.0, device=self.device, requires_grad=True)
+                
+                total_loss += combined_loss
+                logger.info(f"Finished processing item {i}, current loss: {combined_loss.item():.4f}")
 
-        avg_loss = total_loss / batch_size
-        
-        # Clip gradients
-        torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)
-        
-        return avg_loss  
+            avg_loss = total_loss / batch_size
+            logger.info("Computing gradients")
+            
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)
+            logger.info("Finished train_step")
+            
+            return avg_loss
+            
+        except Exception as e:
+            logger.error(f"Error in train_step: {str(e)}")
+            logger.error(f"Error type: {type(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
     def train(
         self,

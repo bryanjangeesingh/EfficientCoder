@@ -5,11 +5,20 @@ from pathlib import Path
 from train import CodeSearchNetDataset
 from transformers import AutoTokenizer
 import logging
+import sys
 import csv
 from datetime import datetime
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
 logger = logging.getLogger(__name__)
 
 def write_metrics(metrics_file, metrics_dict, epoch=None, batch=None):
