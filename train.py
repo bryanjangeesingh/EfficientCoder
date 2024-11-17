@@ -231,7 +231,6 @@ class MultiTeacherDistillation:
         
         # Add gradient clipping
         self.max_grad_norm = 1.0
-        
         # Add learning rate scheduler with warmup
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
