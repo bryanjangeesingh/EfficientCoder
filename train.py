@@ -229,7 +229,7 @@ class MultiTeacherDistillation:
             betas=(0.9, 0.999)
         )
         
-        # Add gradient clipping
+        # Add gradient clipping with max norm
         self.max_grad_norm = 1.0
         # Add learning rate scheduler with warmup
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -282,32 +282,25 @@ class MultiTeacherDistillation:
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Perform one training step with single teacher distillation."""
         try:
-            logger.info("Starting train_step")
             self.optimizer.zero_grad()
             
             # Move input tensors to appropriate devices
             teacher_input_ids = input_batch["input_ids"].to("cuda:0")
             student_input_ids = input_batch["input_ids"].to("cuda:1")
-            batch_size = teacher_input_ids.shape[0]
-            logger.info(f"Processing batch of size {batch_size}")
             
-            # Get teacher outputs for entire batch
-            logger.info("Getting teacher outputs")
+            # Get teacher outputs with mixed precision
             with torch.no_grad(), torch.cuda.amp.autocast():
                 teacher_outputs = self.teacher(teacher_input_ids)
-                # Move teacher logits to student device and detach
                 teacher_logits = teacher_outputs.logits.to("cuda:1").detach()
             
             # Clear GPU 0 cache after teacher forward pass
             torch.cuda.empty_cache()
             
             # Get student outputs with mixed precision
-            logger.info("Getting student outputs")
             with torch.cuda.amp.autocast():
                 student_outputs = self.student(student_input_ids)
 
                 # Apply stable scaling to logits
-                logger.info("Computing logits and probabilities")
                 def scale_logits(logits, temp=1.0, max_value=10.0):
                     logits = logits - logits.mean(dim=-1, keepdim=True)
                     logits = torch.clamp(logits, -max_value, max_value)
@@ -325,7 +318,6 @@ class MultiTeacherDistillation:
                 teacher_probs = compute_probs(teacher_logits)
                 student_log_probs = F.log_softmax(student_logits, dim=-1)
 
-                logger.info("Computing losses")
                 # Compute cross-entropy loss
                 shift_logits = student_outputs.logits[:, :-1, :].contiguous()
                 shift_labels = student_input_ids[:, 1:].contiguous()
@@ -343,7 +335,6 @@ class MultiTeacherDistillation:
                 ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
 
                 if torch.isnan(ce_loss):
-                    logger.error("NaN detected in CE loss, skipping batch")
                     return torch.tensor(0.0, device="cuda:1", requires_grad=True)
 
                 # Compute KL divergence with stability measures
@@ -362,17 +353,9 @@ class MultiTeacherDistillation:
                 )
             
             if torch.isnan(combined_loss):
-                logger.warning(
-                    f"NaN detected in loss computation:\n"
-                    f"CE Loss: {ce_loss.item():.4f}\n"
-                    f"KL Loss: {kl_loss.item():.4f}"
-                )
                 return torch.tensor(0.0, device="cuda:1", requires_grad=True)
             
-            logger.info(f"Final loss: {combined_loss.item():.4f}")
-            
             # Compute gradients with gradient scaling
-            logger.info("Computing gradients")
             self.accelerator.backward(combined_loss)
             
             # Clear unnecessary tensors
@@ -381,15 +364,11 @@ class MultiTeacherDistillation:
             
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)
-            logger.info("Finished train_step")
             
             return combined_loss
             
         except Exception as e:
             logger.error(f"Error in train_step: {str(e)}")
-            logger.error(f"Error type: {type(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     def train(

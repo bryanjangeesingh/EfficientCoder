@@ -9,17 +9,7 @@ import sys
 import csv
 from datetime import datetime
 from tqdm import tqdm
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-logger = logging.getLogger(__name__)
+import os
 
 def write_metrics(metrics_file, metrics_dict, epoch=None, batch=None):
     """Write metrics to CSV file."""
@@ -37,6 +27,20 @@ def write_metrics(metrics_file, metrics_dict, epoch=None, batch=None):
         row = [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), epoch, batch]
         row.extend(metrics_dict.values())
         writer.writerow(row)
+
+def setup_logging(output_dir):
+    """Set up logging configuration."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(output_dir, 'training.log')),
+            logging.StreamHandler()
+        ]
+    )
+    # Suppress other loggers
+    for logger_name in ['transformers', 'accelerate', 'torch', 'datasets']:
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train with CodeSearchNet dataset")
@@ -110,9 +114,10 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Create output directory
+    # Create output directory and setup logging
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(output_dir)
     
     train_metrics_file = output_dir / 'train_metrics.csv'
     val_metrics_file = output_dir / 'val_metrics.csv'
@@ -127,7 +132,7 @@ def main():
     )
     
     # Create datasets
-    logger.info("Loading datasets...")
+    logging.info("Loading datasets...")
     train_dataset = CodeSearchNetDataset(
         data_path=args.data_path,
         tokenizer=distiller.tokenizer,
@@ -144,8 +149,8 @@ def main():
         split="valid"
     )
     
-    logger.info(f"Train dataset size: {len(train_dataset)}")
-    logger.info(f"Validation dataset size: {len(val_dataset)}")
+    logging.info(f"Train dataset size: {len(train_dataset)}")
+    logging.info(f"Validation dataset size: {len(val_dataset)}")
     
     # Create dataloaders
     train_loader = DataLoader(
