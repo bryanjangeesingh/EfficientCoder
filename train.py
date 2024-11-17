@@ -20,6 +20,7 @@ import os
 from tqdm import tqdm
 import queue
 import threading
+from accelerate import DistributedDataParallelKwargs
 
 logger = logging.getLogger(__name__)
 
@@ -155,13 +156,17 @@ class MultiTeacherDistillation:
         # Set environment variable for memory management
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
         
-        # Initialize accelerator with data parallelism
+        # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=16,
             mixed_precision="fp16",
             device_placement=False,  # We'll handle device placement ourselves
-            split_batches=True,  # Enable batch splitting for data parallelism
-            dispatch_batches=True  # Enable batch dispatching across devices
+            kwargs_handlers=[
+                DistributedDataParallelKwargs(
+                    find_unused_parameters=True,
+                    static_graph=False
+                )
+            ]
         )
         
         # Configure model loading with explicit GPU assignments
@@ -397,7 +402,17 @@ class MultiTeacherDistillation:
     ):
         """Train the student model."""
         self.student.train()
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=self.num_workers)
+        
+        # Create data loader with efficient settings
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=self.num_workers,
+            pin_memory=True,
+            prefetch_factor=2,
+            persistent_workers=True
+        )
         
         for epoch in range(num_epochs):
             total_loss = 0
@@ -409,27 +424,38 @@ class MultiTeacherDistillation:
                 dynamic_ncols=True
             )
             
-            dataloader_iter = iter(train_loader)
-            for _ in range(len(train_loader)):
-                batch = self.get_next_batch(dataloader_iter)
+            # Process batches with prefetching
+            for batch in train_loader:
                 loss = self.train_step(batch)
-                total_loss += loss
+                total_loss += loss.item()
                 num_batches += 1
                 
                 # Update progress bar with current loss
-                avg_loss = total_loss / num_batches
-                progress_bar.set_postfix({"Loss": f"{avg_loss:.4f}"})
-                progress_bar.update()
+                progress_bar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'avg_loss': f'{(total_loss / num_batches):.4f}'
+                })
+                progress_bar.update(1)
+                
+                # Clear GPU cache periodically
+                if num_batches % 100 == 0:
+                    torch.cuda.empty_cache()
             
             progress_bar.close()
-            avg_epoch_loss = total_loss / num_batches
-            print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_epoch_loss:.4f}")
-
-            if eval_dataset:
-                self.evaluate(eval_dataset, batch_size)
-
-            self.scheduler.step()
-
+            
+            # Log epoch metrics
+            avg_loss = total_loss / num_batches
+            logger.info(f"Epoch {epoch + 1}/{num_epochs} - Average Loss: {avg_loss:.4f}")
+            
+            # Evaluate if dataset provided
+            if eval_dataset is not None:
+                eval_loss = self.evaluate(eval_dataset, batch_size)
+                logger.info(f"Epoch {epoch + 1}/{num_epochs} - Eval Loss: {eval_loss:.4f}")
+                
+            # Save checkpoint
+            if (epoch + 1) % 5 == 0:
+                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
+                
     def evaluate(self, eval_dataset: CodeSearchNetDataset, batch_size: int):
         """Evaluate the student model."""
         self.student.eval()
@@ -443,3 +469,13 @@ class MultiTeacherDistillation:
 
         avg_loss = total_loss / len(eval_loader)
         print(f"Evaluation Loss: {avg_loss:.4f}")
+        return avg_loss
+
+    def save_checkpoint(self, filename):
+        """Save model checkpoint."""
+        checkpoint = {
+            "student": self.student.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+        }
+        torch.save(checkpoint, filename)
