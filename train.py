@@ -148,14 +148,17 @@ class MultiTeacherDistillation:
         self.teacher2_model_name = teacher2_model_name  
         self.student_model_name = student_model_name
         
-        # Initialize accelerator for distributed training
-        self.accelerator = Accelerator()
+        # Initialize accelerator for distributed training with BF16
+        self.accelerator = Accelerator(
+            mixed_precision='bf16',  # Use BF16 instead of FP16
+            gradient_accumulation_steps=8
+        )
         
         # Configure model loading with explicit GPU assignments
         model_kwargs = {
-            "torch_dtype": torch.float16,
-            "device_map": "auto",  # Let HF handle device mapping
-            "use_cache": False,  # Disable KV-cache for training
+            "torch_dtype": torch.bfloat16,  # Use BF16 precision
+            "device_map": "auto",
+            "use_cache": False,
         }
 
         logger.info("Loading teacher1 (13B) on GPU...")
@@ -164,7 +167,7 @@ class MultiTeacherDistillation:
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
             **model_kwargs
         )
-        self.teacher1.gradient_checkpointing_enable()  # Enable gradient checkpointing
+        self.teacher1.gradient_checkpointing_enable()
         
         logger.info("Loading teacher2 instruct (13B) on GPU...")
         self.teacher2 = AutoModelForCausalLM.from_pretrained(
@@ -182,13 +185,19 @@ class MultiTeacherDistillation:
         )
         self.student.gradient_checkpointing_enable()
 
-        # Initialize tokenizer (all use the same CodeLlama tokenizer)
+        # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Initialize optimizer with 8-bit Adam for memory efficiency
-        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=1e-4)
+        # Initialize optimizer with BF16-compatible settings
+        self.optimizer = torch.optim.AdamW(
+            self.student.parameters(),
+            lr=1e-4,
+            eps=1e-6,  # Slightly larger epsilon for BF16
+            betas=(0.9, 0.95),  # Modified betas for better stability
+            weight_decay=0.01
+        )
         
         # Prepare for distributed training
         self.student, self.optimizer = self.accelerator.prepare(
