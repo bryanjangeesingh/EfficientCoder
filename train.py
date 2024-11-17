@@ -246,68 +246,73 @@ class MultiTeacherDistillation:
             
             # Get teacher outputs for entire batch
             logger.info("Getting teacher outputs")
-            with torch.no_grad():
+            with torch.no_grad(), torch.cuda.amp.autocast():
                 teacher_outputs = self.teacher(teacher_input_ids)
+                # Move teacher logits to student device and detach
+                teacher_logits = teacher_outputs.logits.to("cuda:1").detach()
             
-            # Get student outputs for entire batch
+            # Clear GPU 0 cache after teacher forward pass
+            torch.cuda.empty_cache()
+            
+            # Get student outputs with mixed precision
             logger.info("Getting student outputs")
-            student_outputs = self.student(student_input_ids)
+            with torch.cuda.amp.autocast():
+                student_outputs = self.student(student_input_ids)
 
-            # Apply stable scaling to logits
-            logger.info("Computing logits and probabilities")
-            def scale_logits(logits, temp=1.0, max_value=10.0):
-                logits = logits - logits.mean(dim=-1, keepdim=True)
-                logits = torch.clamp(logits, -max_value, max_value)
-                return logits / (temp + 1e-8)
+                # Apply stable scaling to logits
+                logger.info("Computing logits and probabilities")
+                def scale_logits(logits, temp=1.0, max_value=10.0):
+                    logits = logits - logits.mean(dim=-1, keepdim=True)
+                    logits = torch.clamp(logits, -max_value, max_value)
+                    return logits / (temp + 1e-8)
 
-            # Move teacher logits to student device for loss computation
-            teacher_logits = scale_logits(teacher_outputs.logits.to("cuda:1"), self.temperature)
-            student_logits = scale_logits(student_outputs.logits, self.temperature)
+                teacher_logits = scale_logits(teacher_logits, self.temperature)
+                student_logits = scale_logits(student_outputs.logits, self.temperature)
 
-            # Compute probabilities with numerical stability
-            def compute_probs(logits):
-                probs = F.softmax(logits, dim=-1)
-                probs = torch.clamp(probs, min=1e-8, max=1.0)
-                return probs / probs.sum(dim=-1, keepdim=True)
+                # Compute probabilities with numerical stability
+                def compute_probs(logits):
+                    probs = F.softmax(logits, dim=-1)
+                    probs = torch.clamp(probs, min=1e-8, max=1.0)
+                    return probs / probs.sum(dim=-1, keepdim=True)
 
-            teacher_probs = compute_probs(teacher_logits)
-            student_log_probs = F.log_softmax(student_logits, dim=-1)
+                teacher_probs = compute_probs(teacher_logits)
+                student_log_probs = F.log_softmax(student_logits, dim=-1)
 
-            logger.info("Computing losses")
-            # Compute cross-entropy loss
-            shift_logits = student_outputs.logits[:, :-1, :].contiguous()
-            shift_labels = student_input_ids[:, 1:].contiguous()
-            
-            # Add label smoothing
-            smoothing = 0.1
-            n_class = shift_logits.size(-1)
-            one_hot = torch.zeros_like(shift_logits).scatter(
-                2, shift_labels.unsqueeze(-1), 1-smoothing
-            )
-            one_hot = one_hot + smoothing/n_class
-            
-            # Compute CE loss with label smoothing
-            log_probs = F.log_softmax(shift_logits, dim=-1)
-            ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
+                logger.info("Computing losses")
+                # Compute cross-entropy loss
+                shift_logits = student_outputs.logits[:, :-1, :].contiguous()
+                shift_labels = student_input_ids[:, 1:].contiguous()
+                
+                # Add label smoothing
+                smoothing = 0.1
+                n_class = shift_logits.size(-1)
+                one_hot = torch.zeros_like(shift_logits).scatter(
+                    2, shift_labels.unsqueeze(-1), 1-smoothing
+                )
+                one_hot = one_hot + smoothing/n_class
+                
+                # Compute CE loss with label smoothing
+                log_probs = F.log_softmax(shift_logits, dim=-1)
+                ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
 
-            if torch.isnan(ce_loss):
-                logger.error("NaN detected in CE loss, skipping batch")
-                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+                if torch.isnan(ce_loss):
+                    logger.error("NaN detected in CE loss, skipping batch")
+                    return torch.tensor(0.0, device="cuda:1", requires_grad=True)
 
-            # Compute KL divergence with stability measures
-            kl_loss = F.kl_div(
-                student_log_probs,
-                teacher_probs,
-                reduction='batchmean',
-                log_target=False
-            )
-            kl_loss = torch.clamp(kl_loss, max=10.0)
+                # Compute KL divergence with stability measures
+                kl_loss = F.kl_div(
+                    student_log_probs,
+                    teacher_probs,
+                    reduction='batchmean',
+                    log_target=False
+                )
+                kl_loss = torch.clamp(kl_loss, max=10.0)
 
-            # Combine losses with careful weighting
-            combined_loss = (
-                0.5 * ce_loss +
-                0.5 * kl_loss  # Equal weight between CE and KL since we only have one teacher
-            )
+                # Combine losses with careful weighting
+                combined_loss = (
+                    0.5 * ce_loss +
+                    0.5 * kl_loss
+                )
             
             if torch.isnan(combined_loss):
                 logger.warning(
@@ -319,9 +324,13 @@ class MultiTeacherDistillation:
             
             logger.info(f"Final loss: {combined_loss.item():.4f}")
             
-            # Compute gradients
+            # Compute gradients with gradient scaling
             logger.info("Computing gradients")
             self.accelerator.backward(combined_loss)
+            
+            # Clear unnecessary tensors
+            del teacher_logits, teacher_probs, student_log_probs
+            torch.cuda.empty_cache()
             
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)

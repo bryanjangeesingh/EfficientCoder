@@ -3,10 +3,10 @@
 # Configuration
 DATA_PATH="/nobackup/users/brytech/codesearchnet"  # Update this path
 OUTPUT_DIR="./outputs/distillation_$(date +%Y%m%d_%H%M%S)"
-BATCH_SIZE=16  # Increased from 4
-GRADIENT_ACCUMULATION_STEPS=4  # Reduced from 8 since we increased batch size
+BATCH_SIZE=4  # Reduced from 16
+GRADIENT_ACCUMULATION_STEPS=16  # Increased to maintain effective batch size
 NUM_EPOCHS=10
-MAX_LENGTH=512
+MAX_LENGTH=256  # Reduced from 512
 LEARNING_RATE=5e-5
 TEMPERATURE=2.0
 MAX_SAMPLES=100000  # Set to None for full dataset
