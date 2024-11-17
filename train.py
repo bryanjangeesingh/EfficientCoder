@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import random
 import logging
+import os
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -147,32 +148,39 @@ class MultiTeacherDistillation:
         self.teacher1_model_name = teacher1_model_name
         self.student_model_name = student_model_name
         
-        # Initialize accelerator for distributed training
+        # Set environment variable for memory management
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+        
+        # Initialize accelerator without device placement
         self.accelerator = Accelerator(
             gradient_accumulation_steps=8,
-            mixed_precision="fp16",  # Use mixed precision for better speed
+            mixed_precision="fp16",
+            device_placement=False  # We'll handle device placement ourselves
         )
         
         # Configure model loading with explicit GPU assignments
         teacher_kwargs = {
-            "torch_dtype": torch.float16,  # Use FP16 for teacher (inference only)
-            "device_map": {"": 0},  # Put entire teacher on GPU 0
+            "torch_dtype": torch.float16,
+            "device_map": {"": "cuda:0"},
             "use_cache": False,
         }
         
         student_kwargs = {
-            "torch_dtype": torch.float16,  # Use FP16 for student
-            "device_map": {"": 1},  # Put entire student on GPU 1
+            "torch_dtype": torch.float16,
+            "device_map": {"": "cuda:1"},
             "use_cache": False,
         }
 
-        logger.info("Loading teacher (13B) on GPU 0...")
+        logger.info("Loading teacher (7B) on GPU 0...")
         self.teacher = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_7b_instruct",
             **teacher_kwargs
         )
         self.teacher.gradient_checkpointing_enable()
+        
+        # Clear GPU 0 cache
+        torch.cuda.empty_cache()
         
         logger.info("Loading student model (7B) on GPU 1...")
         self.student = AutoModelForCausalLM.from_pretrained(
@@ -191,12 +199,12 @@ class MultiTeacherDistillation:
         param_groups = [
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' in n],
-                'lr': 5e-5,  # Increased learning rate
+                'lr': 5e-5,
                 'weight_decay': 0.01
             },
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' not in n],
-                'lr': 1e-4,  # Higher learning rate for non-layer params
+                'lr': 1e-4,
                 'weight_decay': 0.0
             }
         ]
@@ -208,7 +216,7 @@ class MultiTeacherDistillation:
         )
         
         # Add gradient clipping
-        self.max_grad_norm = 1.0  # Increased for faster training
+        self.max_grad_norm = 1.0
         
         # Add learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -219,9 +227,9 @@ class MultiTeacherDistillation:
             anneal_strategy='cos'
         )
         
-        # Prepare for distributed training
-        self.student, self.optimizer, self.scheduler = self.accelerator.prepare(
-            self.student, self.optimizer, self.scheduler
+        # Only prepare optimizer and scheduler, not model
+        self.optimizer, self.scheduler = self.accelerator.prepare(
+            self.optimizer, self.scheduler
         )
 
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
