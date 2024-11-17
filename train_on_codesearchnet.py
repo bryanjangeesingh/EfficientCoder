@@ -85,6 +85,11 @@ def parse_args():
         default=1,
         help="Gradient accumulation steps"
     )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Evaluate the model during training"
+    )
     return parser.parse_args()
 
 def main():
@@ -143,96 +148,13 @@ def main():
         pin_memory=True
     )
     
-    # Training loop
-    logger.info("Starting training...")
-    best_val_loss = float('inf')
-    
-    for epoch in range(args.num_epochs):
-        # Training
-        distiller.student.train()
-        total_train_loss = 0
-        
-        # Progress bar for training
-        train_pbar = tqdm(
-            train_loader,
-            desc=f"Epoch {epoch+1}/{args.num_epochs} [Train]",
-            leave=True,
-            dynamic_ncols=True
-        )
-        
-        for batch_idx, batch in enumerate(train_pbar):
-            # Forward and backward pass
-            loss = distiller.train_step(batch)
-            loss = loss / args.gradient_accumulation_steps  # Scale loss
-            total_train_loss += loss.item()  # Convert to float for accumulation
-            
-            # Backward pass with gradient accumulation
-            distiller.accelerator.backward(loss)
-            
-            # Update weights every gradient_accumulation_steps
-            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                distiller.optimizer.step()
-                distiller.optimizer.zero_grad()
-            
-            # Update progress bar
-            train_pbar.set_postfix({
-                "Loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
-                "Acc Step": f"{(batch_idx + 1) % args.gradient_accumulation_steps}/{args.gradient_accumulation_steps}"
-            })
-            
-            if batch_idx % 100 == 0:
-                write_metrics(
-                    train_metrics_file,
-                    {'loss': f"{loss.item() * args.gradient_accumulation_steps:.4f}"},
-                    epoch=epoch+1,
-                    batch=batch_idx
-                )
-        
-        avg_train_loss = total_train_loss / len(train_loader)
-        logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Average Train Loss: {avg_train_loss:.4f}")
-        
-        # Validation
-        distiller.student.eval()
-        total_val_loss = 0
-        
-        # Progress bar for validation
-        val_pbar = tqdm(
-            val_loader,
-            desc=f"Epoch {epoch+1}/{args.num_epochs} [Valid]",
-            leave=True,
-            dynamic_ncols=True
-        )
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(val_pbar):
-                loss = distiller.train_step(batch)  # Using train_step but in eval mode
-                total_val_loss += loss.item()  # Get the loss value as a float
-                
-                # Update progress bar with current loss
-                val_pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
-        
-        avg_val_loss = total_val_loss / len(val_loader)
-        logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Validation Loss: {avg_val_loss:.4f}")
-        
-        # Log epoch metrics
-        write_metrics(
-            val_metrics_file,
-            {'loss': f"{avg_val_loss:.4f}"},
-            epoch=epoch+1
-        )
-        
-        # Save checkpoint if validation loss improved
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            checkpoint_path = output_dir / f"checkpoint_epoch_{epoch+1}.pt"
-            torch.save({
-                'epoch': epoch,
-                'student_state_dict': distiller.student.state_dict(),
-                'optimizer_state_dict': distiller.optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-            }, checkpoint_path)
-            logger.info(f"Saved checkpoint to {checkpoint_path}")
+    # Train the model
+    distiller.train(
+        train_dataset=train_dataset,
+        num_epochs=args.num_epochs,
+        batch_size=args.batch_size,
+        eval_dataset=val_dataset if args.eval else None
+    )
 
 if __name__ == "__main__":
     main()

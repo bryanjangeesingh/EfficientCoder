@@ -9,13 +9,14 @@ from transformers import (
 )
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from accelerate import Accelerator
 import torch.distributed as dist
 import json
 from pathlib import Path
 import random
 import logging
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -362,20 +363,34 @@ class MultiTeacherDistillation:
         train_dataset: CodeSearchNetDataset,
         num_epochs: int,
         batch_size: int,
-        eval_dataset: CodeSearchNetDataset = None,
+        eval_dataset: Optional[CodeSearchNetDataset] = None,
     ):
         """Train the student model."""
+        self.student.train()
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
+        
         for epoch in range(num_epochs):
-            self.student.train()
             total_loss = 0
-
+            num_batches = 0
+            
+            progress_bar = tqdm(
+                total=len(train_loader),
+                desc=f"Epoch {epoch + 1}/{num_epochs} [Train]",
+                dynamic_ncols=True
+            )
+            
             for batch in train_loader:
                 loss = self.train_step(batch)
                 total_loss += loss
-
-            avg_epoch_loss = total_loss / len(train_loader)
+                num_batches += 1
+                
+                # Update progress bar with current loss
+                avg_loss = total_loss / num_batches
+                progress_bar.set_postfix({"Loss": f"{avg_loss:.4f}"})
+                progress_bar.update()
+            
+            progress_bar.close()
+            avg_epoch_loss = total_loss / num_batches
             print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_epoch_loss:.4f}")
 
             if eval_dataset:
