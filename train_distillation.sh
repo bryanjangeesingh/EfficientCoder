@@ -3,13 +3,21 @@
 # Configuration
 DATA_PATH="/nobackup/users/brytech/codesearchnet"  # Update this path
 OUTPUT_DIR="./outputs/distillation_$(date +%Y%m%d_%H%M%S)"
-BATCH_SIZE=4  # Reduced from 16
-GRADIENT_ACCUMULATION_STEPS=16  # Increased to maintain effective batch size
+BATCH_SIZE=8  # Increased from 4 since we have better parallelization
+GRADIENT_ACCUMULATION_STEPS=8  # Reduced since we increased batch size
 NUM_EPOCHS=10
-MAX_LENGTH=256  # Reduced from 512
+MAX_LENGTH=256
 LEARNING_RATE=5e-5
 TEMPERATURE=2.0
-MAX_SAMPLES=100000  # Set to None for full dataset
+MAX_SAMPLES=100000
+NUM_WORKERS=8  # Use more workers for data loading
+
+# Set PyTorch environment variables for performance
+export CUDA_LAUNCH_BLOCKING=0
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
+export OMP_NUM_THREADS=8
+export TOKENIZERS_PARALLELISM=true
 
 # Create output directory
 mkdir -p $OUTPUT_DIR
@@ -23,11 +31,6 @@ echo "Output directory: $OUTPUT_DIR"
 echo "GPU Information:"
 nvidia-smi
 
-# Environment setup
-echo "Setting up Python environment..."
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # Use all 4 GPUs
-export TOKENIZERS_PARALLELISM=true
-
 # Launch training
 echo "Launching training..."
 python train_on_codesearchnet.py \
@@ -40,6 +43,7 @@ python train_on_codesearchnet.py \
     --learning_rate $LEARNING_RATE \
     --temperature $TEMPERATURE \
     --max_samples $MAX_SAMPLES \
+    --num_workers $NUM_WORKERS \
     2>&1 | tee -a "$OUTPUT_DIR/training.log"
 
 # Check if training completed successfully

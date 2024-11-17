@@ -18,6 +18,8 @@ import random
 import logging
 import os
 from tqdm import tqdm
+import queue
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -141,21 +143,25 @@ class MultiTeacherDistillation:
         student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        num_workers: int = 4,  # Number of data loading workers
     ):
         """Initialize the distillation framework with models on different GPUs."""
         self.device = device
         self.temperature = temperature
         self.teacher1_model_name = teacher1_model_name
         self.student_model_name = student_model_name
+        self.num_workers = num_workers
         
         # Set environment variable for memory management
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
         
-        # Initialize accelerator without device placement
+        # Initialize accelerator with data parallelism
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=8,
+            gradient_accumulation_steps=16,
             mixed_precision="fp16",
-            device_placement=False  # We'll handle device placement ourselves
+            device_placement=False,  # We'll handle device placement ourselves
+            split_batches=True,  # Enable batch splitting for data parallelism
+            dispatch_batches=True  # Enable batch dispatching across devices
         )
         
         # Configure model loading with explicit GPU assignments
@@ -190,8 +196,11 @@ class MultiTeacherDistillation:
         )
         self.student.gradient_checkpointing_enable()
 
-        # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.teacher1_model_name)
+        # Initialize tokenizer with parallel processing
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.teacher1_model_name,
+            use_fast=True  # Use fast tokenizer for better performance
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -218,19 +227,53 @@ class MultiTeacherDistillation:
         # Add gradient clipping
         self.max_grad_norm = 1.0
         
-        # Add learning rate scheduler
+        # Add learning rate scheduler with warmup
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
             max_lr=[5e-5, 1e-4],
             total_steps=1000,
             pct_start=0.1,
-            anneal_strategy='cos'
+            anneal_strategy='cos',
+            div_factor=25.0,
+            final_div_factor=1e4,
         )
         
-        # Only prepare optimizer and scheduler, not model
+        # Only prepare optimizer and scheduler
         self.optimizer, self.scheduler = self.accelerator.prepare(
             self.optimizer, self.scheduler
         )
+        
+        # Setup prefetching queue for next batch
+        self.next_batch = None
+        self.prefetch_queue = queue.Queue(maxsize=2)
+        self.prefetch_thread = None
+
+    def prefetch_batch(self, dataloader_iter):
+        """Prefetch next batch in background."""
+        try:
+            batch = next(dataloader_iter)
+            self.prefetch_queue.put(batch)
+        except StopIteration:
+            self.prefetch_queue.put(None)
+
+    def get_next_batch(self, dataloader_iter):
+        """Get next batch with prefetching."""
+        if self.prefetch_thread is None or not self.prefetch_thread.is_alive():
+            self.prefetch_thread = threading.Thread(
+                target=self.prefetch_batch,
+                args=(dataloader_iter,)
+            )
+            self.prefetch_thread.start()
+        
+        batch = self.prefetch_queue.get()
+        if batch is not None:
+            self.prefetch_thread = threading.Thread(
+                target=self.prefetch_batch,
+                args=(dataloader_iter,)
+            )
+            self.prefetch_thread.start()
+        
+        return batch
 
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Perform one training step with single teacher distillation."""
@@ -354,7 +397,7 @@ class MultiTeacherDistillation:
     ):
         """Train the student model."""
         self.student.train()
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=self.num_workers)
         
         for epoch in range(num_epochs):
             total_loss = 0
@@ -366,7 +409,9 @@ class MultiTeacherDistillation:
                 dynamic_ncols=True
             )
             
-            for batch in train_loader:
+            dataloader_iter = iter(train_loader)
+            for _ in range(len(train_loader)):
+                batch = self.get_next_batch(dataloader_iter)
                 loss = self.train_step(batch)
                 total_loss += loss
                 num_batches += 1
