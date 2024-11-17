@@ -149,29 +149,62 @@ class MultiTeacherDistillation:
         
         # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=8
+            gradient_accumulation_steps=8,
+            mixed_precision="fp16",  # Use mixed precision for better speed
         )
         
-        # Configure model loading with FP32 for stability
-        model_kwargs = {
-            "torch_dtype": torch.float32,  # Use full precision
-            "device_map": "auto",
+        # Configure model loading with explicit device mapping
+        teacher_kwargs = {
+            "torch_dtype": torch.float16,  # Use FP16 for teacher (inference only)
+            "device_map": {
+                "model.embed_tokens": 0,
+                "model.layers.0": 0,
+                "model.layers.1": 0,
+                "model.layers.2": 0,
+                "model.layers.3": 0,
+                "model.layers.4": 1,
+                "model.layers.5": 1,
+                "model.layers.6": 1,
+                "model.layers.7": 1,
+                "model.layers.8": 1,
+                "model.layers.9": 1,
+                "model.layers.10": 1,
+                "model.norm": 1,
+                "lm_head": 1,
+            },
+            "use_cache": False,
+        }
+        
+        student_kwargs = {
+            "torch_dtype": torch.float16,  # Use FP16 for student
+            "device_map": {
+                "model.embed_tokens": 2,
+                "model.layers.0": 2,
+                "model.layers.1": 2,
+                "model.layers.2": 2,
+                "model.layers.3": 2,
+                "model.layers.4": 3,
+                "model.layers.5": 3,
+                "model.layers.6": 3,
+                "model.norm": 3,
+                "lm_head": 3,
+            },
             "use_cache": False,
         }
 
-        logger.info("Loading teacher (13B) on GPU...")
+        logger.info("Loading teacher (13B) on GPUs 0,1...")
         self.teacher = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b",
-            **model_kwargs
+            **teacher_kwargs
         )
         self.teacher.gradient_checkpointing_enable()
         
-        logger.info("Loading student model (7B) on GPU...")
+        logger.info("Loading student model (7B) on GPUs 2,3...")
         self.student = AutoModelForCausalLM.from_pretrained(
             self.student_model_name, 
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
-            **model_kwargs
+            **student_kwargs
         )
         self.student.gradient_checkpointing_enable()
 
@@ -180,34 +213,36 @@ class MultiTeacherDistillation:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Initialize optimizer with stability measures
+        # Initialize optimizer with larger batch size and learning rate
         param_groups = [
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' in n],
-                'lr': 1e-5,  # Lower learning rate for transformer layers
+                'lr': 5e-5,  # Increased learning rate
                 'weight_decay': 0.01
             },
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' not in n],
-                'lr': 5e-5,  # Higher learning rate for other parameters
-                'weight_decay': 0.0  # No weight decay for biases and layer norms
+                'lr': 1e-4,  # Higher learning rate for non-layer params
+                'weight_decay': 0.0
             }
         ]
         
         self.optimizer = torch.optim.AdamW(
             param_groups,
             eps=1e-8,
-            betas=(0.9, 0.999)  # Standard betas for better stability
+            betas=(0.9, 0.999)
         )
         
         # Add gradient clipping
-        self.max_grad_norm = 0.5
+        self.max_grad_norm = 1.0  # Increased for faster training
         
         # Add learning rate scheduler
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            T_max=1000,  # Adjust based on your total steps
-            eta_min=1e-6
+            max_lr=[5e-5, 1e-4],
+            total_steps=1000,
+            pct_start=0.1,
+            anneal_strategy='cos'
         )
         
         # Prepare for distributed training
