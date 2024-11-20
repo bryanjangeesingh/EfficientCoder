@@ -32,7 +32,7 @@ def load_model_and_tokenizer(checkpoint_path):
     # Load checkpoint weights
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["student_state_dict"])
     print("Successfully loaded checkpoint weights")
     
     return model, tokenizer
