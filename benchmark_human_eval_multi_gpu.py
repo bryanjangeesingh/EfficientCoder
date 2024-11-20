@@ -33,6 +33,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
         "codellama/CodeLlama-7b-hf",
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights-7b-hf",
     )
     tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
 
@@ -42,8 +43,8 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Fix the prompt formatting
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
-        prompt = problem["prompt"]
+        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+        # prompt = problem["prompt"]
 
         try:
             inputs = tokenizer(
