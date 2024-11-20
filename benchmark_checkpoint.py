@@ -79,6 +79,9 @@ def batch_generate_completions(
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i : i + batch_size]
 
+            # Clear cache before processing new batch
+            torch.cuda.empty_cache()
+
             inputs = tokenizer(
                 batch_prompts,
                 padding=True,
@@ -88,27 +91,71 @@ def batch_generate_completions(
                 return_attention_mask=True,
             ).to(model.device)
 
-            with torch.no_grad():
-                outputs = model.generate(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    num_return_sequences=num_samples_per_task,
+            try:
+                with torch.no_grad():
+                    outputs = model.generate(
+                        input_ids=inputs.input_ids,
+                        attention_mask=inputs.attention_mask,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        num_return_sequences=num_samples_per_task,
+                    )
+
+                # Move outputs to CPU immediately to free GPU memory
+                outputs = outputs.cpu()
+                decoded_outputs = tokenizer.batch_decode(
+                    outputs[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
                 )
 
-            decoded_outputs = tokenizer.batch_decode(
-                outputs[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
-            )
+                # Clear inputs from GPU
+                del inputs
+                torch.cuda.empty_cache()
 
-            # Reshape to group samples for each prompt
-            reshaped_outputs = [
-                decoded_outputs[j : j + num_samples_per_task]
-                for j in range(0, len(decoded_outputs), num_samples_per_task)
-            ]
-            all_completions.extend(reshaped_outputs)
+                # Reshape to group samples for each prompt
+                reshaped_outputs = [
+                    decoded_outputs[j : j + num_samples_per_task]
+                    for j in range(0, len(decoded_outputs), num_samples_per_task)
+                ]
+                all_completions.extend(reshaped_outputs)
+
+            except RuntimeError as e:
+                print(f"Error processing batch: {e}")
+                # If we encounter an OOM error, try to process the batch one at a time
+                if "out of memory" in str(e):
+                    print("Attempting to process batch items individually...")
+                    for prompt in batch_prompts:
+                        torch.cuda.empty_cache()
+                        single_input = tokenizer(
+                            [prompt],
+                            padding=True,
+                            return_tensors="pt",
+                            truncation=True,
+                            max_length=4096,
+                            return_attention_mask=True,
+                        ).to(model.device)
+
+                        with torch.no_grad():
+                            single_output = model.generate(
+                                input_ids=single_input.input_ids,
+                                attention_mask=single_input.attention_mask,
+                                max_new_tokens=max_new_tokens,
+                                do_sample=False,
+                                pad_token_id=tokenizer.pad_token_id,
+                                eos_token_id=tokenizer.eos_token_id,
+                                num_return_sequences=num_samples_per_task,
+                            )
+
+                        single_output = single_output.cpu()
+                        decoded = tokenizer.batch_decode(
+                            single_output[:, single_input.input_ids.shape[1] :],
+                            skip_special_tokens=True,
+                        )
+                        all_completions.append(decoded)
+
+                        del single_input, single_output
+                        torch.cuda.empty_cache()
 
             pbar.update(len(batch_prompts) * num_samples_per_task)
 
