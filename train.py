@@ -141,29 +141,31 @@ class CodeSearchNetDataset(Dataset):
 class MultiTeacherDistillation:
     def __init__(
         self,
-        teacher1_model_name: str = "codellama/CodeLlama-7b-Instruct-hf", # use the instruct model
-        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
+        teacher1_model_name: str = "codellama/CodeLlama-13b-Instruct-hf",
+        teacher2_model_name: str = "codellama/CodeLlama-13b-Python-hf",
+        student_model_name: str = "codellama/CodeLlama-7b-hf",
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        num_workers: int = 4,  # Number of data loading workers
-        checkpoint_path: str = None,  # Path to load checkpoint from
+        num_workers: int = 4,
+        checkpoint_path: str = None,
     ):
-        """Initialize the distillation framework with models on different GPUs."""
+        """Initialize the distillation framework with two teachers and a student model."""
         self.device = device
         self.temperature = temperature
         self.teacher1_model_name = teacher1_model_name
+        self.teacher2_model_name = teacher2_model_name
         self.student_model_name = student_model_name
         self.num_workers = num_workers
-        self.start_epoch = 0  # Track which epoch to start from
-        
+        self.start_epoch = 0
+
         # Set environment variable for memory management
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
-        
+
         # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=16,
             mixed_precision="fp16",
-            device_placement=False,  # We'll handle device placement ourselves
+            device_placement=False,
             kwargs_handlers=[
                 DistributedDataParallelKwargs(
                     find_unused_parameters=True,
@@ -171,34 +173,51 @@ class MultiTeacherDistillation:
                 )
             ]
         )
-        
+
         # Configure model loading with explicit GPU assignments
-        teacher_kwargs = {
+        teacher1_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": {"": "cuda:0"},
             "use_cache": False,
         }
         
-        student_kwargs = {
+        teacher2_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": {"": "cuda:1"},
             "use_cache": False,
         }
 
-        logger.info("Loading teacher (7B) on GPU 0...")
-        self.teacher = AutoModelForCausalLM.from_pretrained(
-            self.teacher1_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_7b_instruct",
-            **teacher_kwargs
+        student_kwargs = {
+            "torch_dtype": torch.float16,
+            "device_map": {"": "cuda:2"},
+            "use_cache": False,
+        }
+
+        logger.info("Loading teacher1 (13B Instruct) on GPU 0...")
+        self.teacher1 = AutoModelForCausalLM.from_pretrained(
+            self.teacher1_model_name,
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
+            **teacher1_kwargs
         )
-        self.teacher.gradient_checkpointing_enable()
-        
+        self.teacher1.gradient_checkpointing_enable()
+
         # Clear GPU 0 cache
         torch.cuda.empty_cache()
-        
-        logger.info("Loading student model (7B) on GPU 1...")
+
+        logger.info("Loading teacher2 (13B Python) on GPU 1...")
+        self.teacher2 = AutoModelForCausalLM.from_pretrained(
+            self.teacher2_model_name,
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_python",
+            **teacher2_kwargs
+        )
+        self.teacher2.gradient_checkpointing_enable()
+
+        # Clear GPU 1 cache
+        torch.cuda.empty_cache()
+
+        logger.info("Loading student model (7B) on GPU 2...")
         self.student = AutoModelForCausalLM.from_pretrained(
-            self.student_model_name, 
+            self.student_model_name,
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
             **student_kwargs
         )
@@ -207,7 +226,7 @@ class MultiTeacherDistillation:
         # Initialize tokenizer with parallel processing
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.teacher1_model_name,
-            use_fast=True  # Use fast tokenizer for better performance
+            use_fast=True
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -216,12 +235,12 @@ class MultiTeacherDistillation:
         param_groups = [
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' in n],
-                'lr': 1e-5,  # Reduced from 5e-5
+                'lr': 1e-5,
                 'weight_decay': 0.01
             },
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' not in n],
-                'lr': 2e-5,  # Reduced from 1e-4
+                'lr': 2e-5,
                 'weight_decay': 0.0
             }
         ]
@@ -241,7 +260,7 @@ class MultiTeacherDistillation:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
             self.student.load_state_dict(checkpoint["student_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            self.start_epoch = checkpoint["epoch"]  # Resume from the next epoch
+            self.start_epoch = checkpoint["epoch"]
             logger.info(f"Resuming from epoch {self.start_epoch}")
         
         # Only prepare optimizer and scheduler
@@ -279,21 +298,25 @@ class MultiTeacherDistillation:
         
         return batch
 
-    def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Perform one training step with single teacher distillation."""
+    def train_step(self, input_batch: Dict[str, torch.Tensor]):
+        """Perform one training step with two teacher distillation."""
         try:
             self.optimizer.zero_grad()
             
             # Move input tensors to appropriate devices
-            teacher_input_ids = input_batch["input_ids"].to("cuda:0")
-            student_input_ids = input_batch["input_ids"].to("cuda:1")
+            teacher1_input_ids = input_batch["input_ids"].to("cuda:0")
+            teacher2_input_ids = input_batch["input_ids"].to("cuda:1")
+            student_input_ids = input_batch["input_ids"].to("cuda:2")
             
             # Get teacher outputs with mixed precision
             with torch.no_grad(), torch.cuda.amp.autocast():
-                teacher_outputs = self.teacher(teacher_input_ids)
-                teacher_logits = teacher_outputs.logits.to("cuda:1").detach()
+                teacher1_outputs = self.teacher1(teacher1_input_ids)
+                teacher1_logits = teacher1_outputs.logits.to("cuda:2").detach()
+                
+                teacher2_outputs = self.teacher2(teacher2_input_ids)
+                teacher2_logits = teacher2_outputs.logits.to("cuda:2").detach()
             
-            # Clear GPU 0 cache after teacher forward pass
+            # Clear GPU caches after teacher forward passes
             torch.cuda.empty_cache()
             
             # Get student outputs with mixed precision
@@ -306,7 +329,8 @@ class MultiTeacherDistillation:
                     logits = torch.clamp(logits, -max_value, max_value)
                     return logits / (temp + 1e-8)
 
-                teacher_logits = scale_logits(teacher_logits, self.temperature)
+                teacher1_logits = scale_logits(teacher1_logits, self.temperature)
+                teacher2_logits = scale_logits(teacher2_logits, self.temperature)
                 student_logits = scale_logits(student_outputs.logits, self.temperature)
 
                 # Compute probabilities with numerical stability
@@ -315,7 +339,8 @@ class MultiTeacherDistillation:
                     probs = torch.clamp(probs, min=1e-8, max=1.0)
                     return probs / probs.sum(dim=-1, keepdim=True)
 
-                teacher_probs = compute_probs(teacher_logits)
+                teacher1_probs = compute_probs(teacher1_logits)
+                teacher2_probs = compute_probs(teacher2_logits)
                 student_log_probs = F.log_softmax(student_logits, dim=-1)
 
                 # Compute cross-entropy loss
@@ -335,22 +360,29 @@ class MultiTeacherDistillation:
                 ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
 
                 if torch.isnan(ce_loss):
-                    return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+                    return torch.tensor(0.0, device="cuda:2", requires_grad=True)
 
-                # Compute KL divergence with stability measures
-                kl_loss = F.kl_div(
+                # Compute KL divergence for both teachers
+                kl_loss1 = F.kl_div(
                     student_log_probs,
-                    teacher_probs,
+                    teacher1_probs,
                     reduction='batchmean',
                     log_target=False
                 )
-                kl_loss = torch.clamp(kl_loss, max=10.0)
+                kl_loss1 = torch.clamp(kl_loss1, max=10.0)
+
+                kl_loss2 = F.kl_div(
+                    student_log_probs,
+                    teacher2_probs,
+                    reduction='batchmean',
+                    log_target=False
+                )
+                kl_loss2 = torch.clamp(kl_loss2, max=10.0)
 
                 # Dynamic loss weighting based on training progress
                 try:
-                    # Get optimizer step count safely
                     opt_state = self.optimizer.state_dict()["state"]
-                    if opt_state:  # Check if state exists
+                    if opt_state:
                         first_param_state = opt_state[list(opt_state.keys())[0]]
                         step_count = first_param_state.get("step", 0)
                     else:
@@ -358,26 +390,31 @@ class MultiTeacherDistillation:
                     
                     progress = min(1.0, step_count / 1000)
                 except:
-                    # Fallback to default weights if any error
                     progress = 0.0
-                
-                kl_weight = max(0.1, 0.5 * (1 - progress))  # Gradually reduce KL weight
+
+                # Balance between CE and both teachers
+                kl_weight = max(0.1, 0.6 * (1 - progress))
                 ce_weight = 1 - kl_weight
+                
+                # Split KL weight between teachers
+                kl_weight1 = kl_weight * 0.5
+                kl_weight2 = kl_weight * 0.5
 
                 # Combine losses with dynamic weighting
                 combined_loss = (
                     ce_weight * ce_loss +
-                    kl_weight * kl_loss
+                    kl_weight1 * kl_loss1 +
+                    kl_weight2 * kl_loss2
                 )
             
             if torch.isnan(combined_loss):
-                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+                return torch.tensor(0.0, device="cuda:2", requires_grad=True)
             
             # Compute gradients with gradient scaling
             self.accelerator.backward(combined_loss)
             
             # Clear unnecessary tensors
-            del teacher_logits, teacher_probs, student_log_probs
+            del teacher1_logits, teacher2_logits, teacher1_probs, teacher2_probs, student_log_probs
             torch.cuda.empty_cache()
             
             # Clip gradients
@@ -411,7 +448,7 @@ class MultiTeacherDistillation:
         )
         
         num_training_steps = len(train_dataset) // batch_size * num_epochs
-        num_warmup_steps = num_training_steps // 10  # 10% warmup
+        num_warmup_steps = num_training_steps // 10
         
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
@@ -421,7 +458,7 @@ class MultiTeacherDistillation:
         
         self.scheduler = self.accelerator.prepare(self.scheduler)
         
-        for epoch in range(self.start_epoch, num_epochs):  # Start from the loaded epoch
+        for epoch in range(self.start_epoch, num_epochs):
             total_loss = 0
             num_batches = 0
             
@@ -460,7 +497,7 @@ class MultiTeacherDistillation:
                 "student_state_dict": self.student.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "scheduler_state_dict": self.scheduler.state_dict(),
-                "epoch": epoch + 1,  # Save the next epoch number
+                "epoch": epoch + 1,
                 "train_loss": avg_loss
             }
             torch.save(checkpoint, f"checkpoint_epoch_{epoch + 1}.pt")
