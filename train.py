@@ -347,7 +347,20 @@ class MultiTeacherDistillation:
                 kl_loss = torch.clamp(kl_loss, max=10.0)
 
                 # Dynamic loss weighting based on training progress
-                progress = self.optimizer.state_dict()["state"][list(self.optimizer.state_dict()["state"].keys())[0]]["step"] / 1000
+                try:
+                    # Get optimizer step count safely
+                    opt_state = self.optimizer.state_dict()["state"]
+                    if opt_state:  # Check if state exists
+                        first_param_state = opt_state[list(opt_state.keys())[0]]
+                        step_count = first_param_state.get("step", 0)
+                    else:
+                        step_count = 0
+                    
+                    progress = min(1.0, step_count / 1000)
+                except:
+                    # Fallback to default weights if any error
+                    progress = 0.0
+                
                 kl_weight = max(0.1, 0.5 * (1 - progress))  # Gradually reduce KL weight
                 ce_weight = 1 - kl_weight
 
