@@ -128,7 +128,8 @@ def main():
         teacher1_model_name="codellama/CodeLlama-7b-Instruct-hf",
         student_model_name="codellama/CodeLlama-7b-hf",
         temperature=args.temperature,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        checkpoint_path="/nobackup/users/brytech/projects/condas/nlp_4gpus/EfficientCoder/checkpoint_epoch_1.pt"
     )
     
     # Create datasets

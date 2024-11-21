@@ -145,6 +145,7 @@ class MultiTeacherDistillation:
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         num_workers: int = 4,  # Number of data loading workers
+        checkpoint_path: str = None,  # Path to load checkpoint from
     ):
         """Initialize the distillation framework with models on different GPUs."""
         self.device = device
@@ -152,6 +153,7 @@ class MultiTeacherDistillation:
         self.teacher1_model_name = teacher1_model_name
         self.student_model_name = student_model_name
         self.num_workers = num_workers
+        self.start_epoch = 0  # Track which epoch to start from
         
         # Set environment variable for memory management
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
@@ -241,6 +243,16 @@ class MultiTeacherDistillation:
             div_factor=25.0,
             final_div_factor=1e4,
         )
+        
+        # Load checkpoint if provided
+        if checkpoint_path:
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            self.student.load_state_dict(checkpoint["student_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            self.start_epoch = checkpoint["epoch"]  # Resume from the next epoch
+            logger.info(f"Resuming from epoch {self.start_epoch}")
         
         # Only prepare optimizer and scheduler
         self.optimizer, self.scheduler = self.accelerator.prepare(
@@ -388,11 +400,11 @@ class MultiTeacherDistillation:
             shuffle=True, 
             num_workers=self.num_workers,
             pin_memory=True,
-            prefetch_factor=2,
+            prefetch_factor=4,
             persistent_workers=True
         )
         
-        for epoch in range(num_epochs):
+        for epoch in range(self.start_epoch, num_epochs):  # Start from the loaded epoch
             total_loss = 0
             num_batches = 0
             
@@ -431,11 +443,11 @@ class MultiTeacherDistillation:
                 "student_state_dict": self.student.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "scheduler_state_dict": self.scheduler.state_dict(),
-                "epoch": epoch + 1,
+                "epoch": epoch + 1,  # Save the next epoch number
                 "train_loss": avg_loss
             }
             torch.save(checkpoint, f"checkpoint_epoch_{epoch + 1}.pt")
-                
+
     def evaluate(self, eval_dataset: CodeSearchNetDataset, batch_size: int):
         """Evaluate the student model."""
         self.student.eval()
