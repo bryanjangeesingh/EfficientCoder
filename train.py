@@ -21,6 +21,7 @@ from tqdm import tqdm
 import queue
 import threading
 from accelerate import DistributedDataParallelKwargs
+from transformers import get_linear_schedule_with_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -211,16 +212,16 @@ class MultiTeacherDistillation:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Initialize optimizer with larger batch size and learning rate
+        # Initialize optimizer with more conservative learning rates
         param_groups = [
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' in n],
-                'lr': 5e-5,
+                'lr': 1e-5,  # Reduced from 5e-5
                 'weight_decay': 0.01
             },
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' not in n],
-                'lr': 1e-4,
+                'lr': 2e-5,  # Reduced from 1e-4
                 'weight_decay': 0.0
             }
         ]
@@ -233,16 +234,6 @@ class MultiTeacherDistillation:
         
         # Add gradient clipping with max norm
         self.max_grad_norm = 1.0
-        # Add learning rate scheduler with warmup
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            self.optimizer,
-            max_lr=[5e-5, 1e-4],
-            total_steps=1000,
-            pct_start=0.1,
-            anneal_strategy='cos',
-            div_factor=25.0,
-            final_div_factor=1e4,
-        )
         
         # Load checkpoint if provided
         if checkpoint_path:
@@ -250,14 +241,11 @@ class MultiTeacherDistillation:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
             self.student.load_state_dict(checkpoint["student_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             self.start_epoch = checkpoint["epoch"]  # Resume from the next epoch
             logger.info(f"Resuming from epoch {self.start_epoch}")
         
         # Only prepare optimizer and scheduler
-        self.optimizer, self.scheduler = self.accelerator.prepare(
-            self.optimizer, self.scheduler
-        )
+        self.optimizer = self.accelerator.prepare(self.optimizer)
         
         # Setup prefetching queue for next batch
         self.next_batch = None
@@ -358,10 +346,15 @@ class MultiTeacherDistillation:
                 )
                 kl_loss = torch.clamp(kl_loss, max=10.0)
 
-                # Combine losses with careful weighting
+                # Dynamic loss weighting based on training progress
+                progress = self.optimizer.state_dict()["state"][list(self.optimizer.state_dict()["state"].keys())[0]]["step"] / 1000
+                kl_weight = max(0.1, 0.5 * (1 - progress))  # Gradually reduce KL weight
+                ce_weight = 1 - kl_weight
+
+                # Combine losses with dynamic weighting
                 combined_loss = (
-                    0.5 * ce_loss +
-                    0.5 * kl_loss
+                    ce_weight * ce_loss +
+                    kl_weight * kl_loss
                 )
             
             if torch.isnan(combined_loss):
@@ -403,6 +396,17 @@ class MultiTeacherDistillation:
             prefetch_factor=4,
             persistent_workers=True
         )
+        
+        num_training_steps = len(train_dataset) // batch_size * num_epochs
+        num_warmup_steps = num_training_steps // 10  # 10% warmup
+        
+        self.scheduler = get_linear_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+        
+        self.scheduler = self.accelerator.prepare(self.scheduler)
         
         for epoch in range(self.start_epoch, num_epochs):  # Start from the loaded epoch
             total_loss = 0
