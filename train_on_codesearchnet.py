@@ -125,11 +125,11 @@ def main():
     # Initialize the distiller
     from train import MultiTeacherDistillation
     distiller = MultiTeacherDistillation(
-        teacher1_model_name="codellama/CodeLlama-7b-Instruct-hf",
+        teacher1_model_name="codellama/CodeLlama-13b-Instruct-hf",
         student_model_name="codellama/CodeLlama-7b-hf",
         temperature=args.temperature,
         num_workers=args.num_workers,
-        checkpoint_path="/nobackup/users/brytech/projects/condas/nlp_4gpus/EfficientCoder/checkpoint_epoch_1.pt"
+        checkpoint_path=""
     )
     
     # Create datasets
