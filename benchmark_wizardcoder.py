@@ -47,9 +47,10 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Format prompt according to WizardCoder's style
         prompt = (
-            "Below is a Python programming problem. Write a solution to solve it:\n\n"
-            f"Problem: {problem['prompt']}\n\n"
-            "Solution:"
+            "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n"
+            "### Instruction:\n"
+            f"{problem['prompt']}\n\n"
+            "### Response:\n"
         )
 
         try:
@@ -77,6 +78,14 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
             
             # Clean up the completion
             completion = completion.strip()
+            if completion.startswith("Here's a solution") or completion.startswith("Here is"):
+                # Remove the introductory text
+                completion = completion.split("\n", 1)[1].strip()
+            
+            if completion.startswith("```python"):
+                # Remove code block markers
+                completion = completion.replace("```python", "").replace("```", "").strip()
+            
             if completion.startswith("def"):
                 # If completion starts with function definition, use as is
                 pass
