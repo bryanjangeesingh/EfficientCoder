@@ -78,6 +78,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
             
             # Clean up the completion
             completion = completion.strip()
+            
             if completion.startswith("Here's a solution") or completion.startswith("Here is"):
                 # Remove the introductory text
                 completion = completion.split("\n", 1)[1].strip()
@@ -86,23 +87,33 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
                 # Remove code block markers
                 completion = completion.replace("```python", "").replace("```", "").strip()
             
+            valid_completion = None
             if completion.startswith("def"):
                 # If completion starts with function definition, use as is
-                pass
+                valid_completion = completion
             elif "def" in completion:
                 # If "def" is somewhere in the completion, extract from there
-                completion = completion[completion.index("def"):]
-            else:
-                # If no function definition found, skip this completion
-                logger.warning(f"No function definition found in completion for task {problem['task_id']}")
-                continue
-
+                valid_completion = completion[completion.index("def"):]
+            
+            if valid_completion is None:
+                # If no function definition found, create a default failing function
+                logger.warning(f"No function definition found in completion for task {problem['task_id']}. Creating default function.")
+                # Extract function signature from the prompt
+                prompt_lines = problem['prompt'].split('\n')
+                function_def = next((line for line in prompt_lines if line.strip().startswith('def ')), None)
+                if function_def:
+                    # Create a function that raises NotImplementedError
+                    valid_completion = f"{function_def}\n    raise NotImplementedError('No valid completion generated')"
+                else:
+                    logger.error(f"Could not find function definition in prompt for task {problem['task_id']}")
+                    valid_completion = "def dummy():\n    raise NotImplementedError('No valid completion generated')"
+            
             # Remove any additional content after the function
-            if "\n\n" in completion:
-                completion = completion.split("\n\n")[0]
+            if "\n\n" in valid_completion:
+                valid_completion = valid_completion.split("\n\n")[0]
 
             completions.append(
-                dict(task_id=problem["task_id"], completion=completion)
+                dict(task_id=problem["task_id"], completion=valid_completion)
             )
 
             # Save intermediate results
