@@ -141,8 +141,8 @@ class CodeSearchNetDataset(Dataset):
 class MultiTeacherDistillation:
     def __init__(
         self,
-        teacher1_model_name: str = "codellama/CodeLlama-13b-Instruct-hf", # use the instruct model
-        student_model_name: str = "codellama/CodeLlama-7b-hf",        # Base student model
+        teacher1_model_name: str = "WizardLMTeam/WizardCoder-Python-13B-V1.0",
+        student_model_name: str = "codellama/CodeLlama-7b-hf",
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         num_workers: int = 4,  # Number of data loading workers
@@ -185,10 +185,10 @@ class MultiTeacherDistillation:
             "use_cache": False,
         }
 
-        logger.info("Loading teacher (13B) on GPU 0...")
+        logger.info("Loading WizardCoder teacher (13B) on GPU 0...")
         self.teacher = AutoModelForCausalLM.from_pretrained(
             self.teacher1_model_name, 
-            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_13b_instruct",
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_wizard_coder",
             **teacher_kwargs
         )
         self.teacher.gradient_checkpointing_enable()
@@ -205,9 +205,11 @@ class MultiTeacherDistillation:
         self.student.gradient_checkpointing_enable()
 
         # Initialize tokenizer with parallel processing
+        logger.info("Loading WizardCoder tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.teacher1_model_name,
-            use_fast=True  # Use fast tokenizer for better performance
+            use_fast=True,  # Use fast tokenizer for better performance
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_wizard_coder"
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -279,8 +281,47 @@ class MultiTeacherDistillation:
         
         return batch
 
+    def compute_uld_loss(self, teacher_logits, student_logits, temperature=1.0):
+        """
+        Compute Universal Logit Distillation loss as described in the paper.
+        This loss is based on pairwise differences between logits and is more robust
+        to different vocabularies between teacher and student.
+        """
+        # Compute pairwise differences for teacher and student
+        teacher_diff = teacher_logits.unsqueeze(-1) - teacher_logits.unsqueeze(-2)  # [B, S, V, V]
+        student_diff = student_logits.unsqueeze(-1) - student_logits.unsqueeze(-2)  # [B, S, V, V]
+        
+        # Scale by temperature
+        teacher_diff = teacher_diff / temperature
+        student_diff = student_diff / temperature
+        
+        # Create mask to avoid comparing token with itself
+        vocab_size = teacher_logits.size(-1)
+        mask = ~torch.eye(vocab_size, dtype=torch.bool, device=teacher_logits.device)
+        mask = mask.view(1, 1, vocab_size, vocab_size).expand_as(teacher_diff)
+        
+        # Apply mask
+        teacher_diff = teacher_diff[mask].view(teacher_logits.size(0), teacher_logits.size(1), -1)
+        student_diff = student_diff[mask].view(student_logits.size(0), student_logits.size(1), -1)
+        
+        # Compute loss using sigmoid cross entropy
+        teacher_prob = torch.sigmoid(teacher_diff)
+        student_prob = torch.sigmoid(student_diff)
+        
+        # Binary cross entropy loss
+        loss = F.binary_cross_entropy_with_logits(
+            student_diff,
+            teacher_prob,
+            reduction='none'
+        )
+        
+        # Average over all pairs and sequence length
+        loss = loss.mean()
+        
+        return loss
+
     def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Perform one training step with single teacher distillation."""
+        """Perform one training step with Universal Logit Distillation loss."""
         try:
             self.optimizer.zero_grad()
             
@@ -299,91 +340,37 @@ class MultiTeacherDistillation:
             # Get student outputs with mixed precision
             with torch.cuda.amp.autocast():
                 student_outputs = self.student(student_input_ids)
-
-                # Apply stable scaling to logits
-                def scale_logits(logits, temp=1.0, max_value=10.0):
-                    logits = logits - logits.mean(dim=-1, keepdim=True)
-                    logits = torch.clamp(logits, -max_value, max_value)
-                    return logits / (temp + 1e-8)
-
-                teacher_logits = scale_logits(teacher_logits, self.temperature)
-                student_logits = scale_logits(student_outputs.logits, self.temperature)
-
-                # Compute probabilities with numerical stability
-                def compute_probs(logits):
-                    probs = F.softmax(logits, dim=-1)
-                    probs = torch.clamp(probs, min=1e-8, max=1.0)
-                    return probs / probs.sum(dim=-1, keepdim=True)
-
-                teacher_probs = compute_probs(teacher_logits)
-                student_log_probs = F.log_softmax(student_logits, dim=-1)
-
-                # Compute cross-entropy loss
-                shift_logits = student_outputs.logits[:, :-1, :].contiguous()
-                shift_labels = student_input_ids[:, 1:].contiguous()
+                student_logits = student_outputs.logits
                 
-                # Add label smoothing
-                smoothing = 0.1
-                n_class = shift_logits.size(-1)
-                one_hot = torch.zeros_like(shift_logits).scatter(
-                    2, shift_labels.unsqueeze(-1), 1-smoothing
+                # Compute ULD loss
+                shift_teacher_logits = teacher_logits[:, :-1, :].contiguous()
+                shift_student_logits = student_logits[:, :-1, :].contiguous()
+                
+                # Handle potential NaN or Inf values
+                shift_teacher_logits = torch.nan_to_num(shift_teacher_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+                shift_student_logits = torch.nan_to_num(shift_student_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+                
+                # Compute ULD loss with temperature scaling
+                loss = self.compute_uld_loss(
+                    shift_teacher_logits,
+                    shift_student_logits,
+                    temperature=self.temperature
                 )
-                one_hot = one_hot + smoothing/n_class
                 
-                # Compute CE loss with label smoothing
-                log_probs = F.log_softmax(shift_logits, dim=-1)
-                ce_loss = -(one_hot * log_probs).sum(dim=-1).mean()
-
-                if torch.isnan(ce_loss):
+                if torch.isnan(loss):
                     return torch.tensor(0.0, device="cuda:1", requires_grad=True)
-
-                # Compute KL divergence with stability measures
-                kl_loss = F.kl_div(
-                    student_log_probs,
-                    teacher_probs,
-                    reduction='batchmean',
-                    log_target=False
-                )
-                kl_loss = torch.clamp(kl_loss, max=10.0)
-
-                # Dynamic loss weighting based on training progress
-                try:
-                    # Get optimizer step count safely
-                    opt_state = self.optimizer.state_dict()["state"]
-                    if opt_state:  # Check if state exists
-                        first_param_state = opt_state[list(opt_state.keys())[0]]
-                        step_count = first_param_state.get("step", 0)
-                    else:
-                        step_count = 0
-                    
-                    progress = min(1.0, step_count / 1000)
-                except:
-                    # Fallback to default weights if any error
-                    progress = 0.0
-                
-                kl_weight = max(0.1, 0.5 * (1 - progress))  # Gradually reduce KL weight
-                ce_weight = 1 - kl_weight
-
-                # Combine losses with dynamic weighting
-                combined_loss = (
-                    ce_weight * ce_loss +
-                    kl_weight * kl_loss
-                )
-            
-            if torch.isnan(combined_loss):
-                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
             
             # Compute gradients with gradient scaling
-            self.accelerator.backward(combined_loss)
+            self.accelerator.backward(loss)
             
             # Clear unnecessary tensors
-            del teacher_logits, teacher_probs, student_log_probs
+            del teacher_logits
             torch.cuda.empty_cache()
             
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)
             
-            return combined_loss
+            return loss
             
         except Exception as e:
             logger.error(f"Error in train_step: {str(e)}")
