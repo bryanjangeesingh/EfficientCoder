@@ -92,6 +92,7 @@ def main():
     # Generate
     try:
         completion = generate_completion(model, tokenizer, test_prompt, gpu_id)
+        import pdb; pdb.set_trace()
         print("Generated completion:")
         print(completion)
     except Exception as e:
