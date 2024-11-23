@@ -62,9 +62,8 @@ def generate_completion(model, tokenizer, prompt, gpu_id=0):
         num_return_sequences=1,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
-        attention_mask=inputs["attention_mask"],
         num_beams=1,  # Disable beam search since we're using sampling
-        early_stopping=False,  # Disable early stopping since we're not using beam search
+        early_stopping=False  # Disable early stopping since we're not using beam search
     )
     
     # Decode only the new tokens
