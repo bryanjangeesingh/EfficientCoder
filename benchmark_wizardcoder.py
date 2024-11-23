@@ -61,7 +61,7 @@ def evaluate_on_gpu(gpu_id: int, problems: Dict, output_file: str):
         try:
             # Format prompt according to WizardCoder's style
             prompt = (
-                "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n"
+                "Below is the start of a python program. Continue it.\n\n"
                 "### Instruction:\n"
                 f"{problem['prompt']}\n\n"
                 "### Response:\n"
@@ -98,25 +98,52 @@ def evaluate_on_gpu(gpu_id: int, problems: Dict, output_file: str):
             if completion.startswith("```python"):
                 completion = completion.replace("```python", "").replace("```", "").strip()
             
-            valid_completion = None
-            if completion.startswith("def"):
-                valid_completion = completion
-            elif "def" in completion:
-                valid_completion = completion[completion.index("def"):]
-            
-            if valid_completion is None:
-                # Extract function signature from the prompt
-                prompt_lines = problem['prompt'].split('\n')
-                function_def = next((line for line in prompt_lines if line.strip().startswith('def ')), None)
-                if function_def:
-                    valid_completion = f"{function_def}\n    raise NotImplementedError('No valid completion generated')"
+            # Extract just the function body
+            def extract_function_body(completion: str, function_def: str) -> str:
+                """Extract the function body from the completion."""
+                # If completion starts with the function definition, remove it
+                if completion.startswith(function_def.strip()):
+                    # Split by newline and remove the first line (function def)
+                    body_lines = completion.split("\n")[1:]
+                elif "def " in completion:
+                    # Find the function body after any "def" line
+                    body_lines = completion[completion.index("def "):].split("\n")[1:]
                 else:
-                    logger.error(f"Could not find function definition in prompt for task {task_id}")
-                    valid_completion = "def dummy():\n    raise NotImplementedError('No valid completion generated')"
+                    # If no function def found, treat the whole completion as body
+                    body_lines = completion.split("\n")
+                
+                # Remove any empty lines at the start
+                while body_lines and not body_lines[0].strip():
+                    body_lines.pop(0)
+                
+                # Handle indentation
+                if body_lines:
+                    # Get the indentation of the first non-empty line
+                    first_line = body_lines[0]
+                    indent = len(first_line) - len(first_line.lstrip())
+                    # Remove that amount of indentation from all lines
+                    body_lines = [line[indent:] if line.startswith(" " * indent) else line for line in body_lines]
+                
+                return "\n".join(body_lines).rstrip()
             
-            if "\n\n" in valid_completion:
-                valid_completion = valid_completion.split("\n\n")[0]
-
+            valid_completion = None
+            try:
+                # Extract the function body
+                valid_completion = extract_function_body(completion, problem['prompt'])
+                
+                # Add proper indentation (4 spaces) to each line
+                valid_completion = "\n".join(f"    {line}" if line.strip() else line 
+                                          for line in valid_completion.split("\n"))
+                
+                # Verify the completion isn't empty
+                if not valid_completion.strip():
+                    raise ValueError("Empty function body")
+                
+            except Exception as e:
+                logger.warning(f"Error processing completion for task {task_id}: {str(e)}")
+                # Create a failing function body
+                valid_completion = "    raise NotImplementedError('No valid completion generated')"
+            
             result = dict(task_id=task_id, completion=valid_completion)
             
             # Save result atomically
