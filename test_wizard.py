@@ -2,6 +2,10 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 model = AutoModelForCausalLM.from_pretrained("WizardLMTeam/WizardCoder-Python-13B-V1.0")
 tokenizer = AutoTokenizer.from_pretrained("WizardLMTeam/WizardCoder-Python-13B-V1.0")
+cache_dir = "/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_wizard_coder"
+
+model.from_pretrained(cache_dir, local_files_only=True)
+tokenizer.from_pretrained(cache_dir, local_files_only=True)
 
 def run():
     # pass in prompt
