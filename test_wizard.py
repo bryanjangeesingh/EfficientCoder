@@ -74,11 +74,16 @@ def generate_completion(model, tokenizer, prompt, gpu_id=0):
     
     return completion.strip()
 
+problem = {"task_id": "test/0", "prompt": "def return1():\n", "canonical_solution": "    return 1", "test": "def check(candidate):\n    assert candidate() == 1", "entry_point": "return1"}
+
 def main():
     # Test prompt
-    test_prompt = """
-    Write a function that takes a list of integers and returns their sum.
-    """
+    test_prompt = (
+        "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n"
+        "### Instruction:\n"
+        f"{problem['prompt']}\n\n"
+        "### Response:\n"
+    )
     
     # Setup
     gpu_id = 0
