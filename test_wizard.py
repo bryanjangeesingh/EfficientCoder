@@ -79,7 +79,7 @@ problem = {"task_id": "test/0", "prompt": "def return1():\n", "canonical_solutio
 def main():
     # Test prompt
     test_prompt = (
-        "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n"
+        "Below is the start of a python program. Complete it.\n\n"
         "### Instruction:\n"
         f"{problem['prompt']}\n\n"
         "### Response:\n"
