@@ -10,6 +10,7 @@ import sys
 import numpy as np
 from typing import List, Dict
 from filelock import FileLock
+from safetensors.torch import load_file
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
@@ -42,10 +43,23 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str, checkpo
     )
 
     # Load checkpoint weights
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
-    model.load_state_dict(checkpoint["student_state_dict"])
-    logger.info("Successfully loaded checkpoint weights")
+
+    if checkpoint_path.endswith(".safetensors"):
+        # Safetensors loading
+        logger.info(f"Loading checkpoint from safetensors file {checkpoint_path}")
+        state_dict = load_file(checkpoint_path, device=f"cuda:{gpu_id}")
+        model.load_state_dict(state_dict)
+    else:
+        # Fallback to traditional PyTorch loading
+        logger.info(f"Loading checkpoint from PyTorch file {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
+        model.load_state_dict(checkpoint["student_state_dict"])
+
+
+    # logger.info(f"Loading checkpoint from {checkpoint_path}")
+    # checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
+    # model.load_state_dict(checkpoint["student_state_dict"])
+    # logger.info("Successfully loaded checkpoint weights")
 
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
