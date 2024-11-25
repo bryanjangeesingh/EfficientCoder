@@ -23,43 +23,37 @@ def setup_gpu_process(rank):
     """Set up process-specific GPU settings."""
     torch.cuda.set_device(rank)
 
-def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str, checkpoint_path: str):
+
+def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str, base_model_path: str, checkpoint_path: str):
     """Evaluate problems on a specific GPU."""
     setup_gpu_process(gpu_id)
     logger.info(f"Starting evaluation on GPU {gpu_id}")
 
-    # Initialize model and tokenizer
-    model_name = "codellama/CodeLlama-7b-hf"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Initialize tokenizer
+    logger.info(f"Loading tokenizer from base model path: {base_model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Load base model
+    logger.info(f"Loading base model from path: {base_model_path}")
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+        base_model_path,
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student",
     )
 
-    # Load checkpoint weights
-
+    # Load PEFT weights
     if checkpoint_path.endswith(".safetensors"):
         # Safetensors loading
-        logger.info(f"Loading checkpoint from safetensors file {checkpoint_path}")
+        logger.info(f"Loading PEFT weights from safetensors file {checkpoint_path}")
         state_dict = load_file(checkpoint_path, device=f"cuda:{gpu_id}")
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)  # Use strict=False to allow partial loading
     else:
         # Fallback to traditional PyTorch loading
-        logger.info(f"Loading checkpoint from PyTorch file {checkpoint_path}")
+        logger.info(f"Loading PEFT weights from PyTorch file {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
-        model.load_state_dict(checkpoint["student_state_dict"])
-
-
-    # logger.info(f"Loading checkpoint from {checkpoint_path}")
-    # checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
-    # model.load_state_dict(checkpoint["student_state_dict"])
-    # logger.info("Successfully loaded checkpoint weights")
+        model.load_state_dict(checkpoint, strict=False)
 
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
@@ -180,6 +174,12 @@ def main():
         help="Path to save the completions",
     )
     parser.add_argument(
+        "--base_model_path",
+        type=str,
+        required=True,
+        help="Path to the base model directory",
+    )
+    parser.add_argument(
         "--checkpoint_path",
         type=str,
         required=True,
@@ -203,7 +203,7 @@ def main():
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
         p = mp.Process(
             target=evaluate_on_gpu, 
-            args=(gpu_id, problem_chunk, args.output_file, args.checkpoint_path)
+            args=(gpu_id, problem_chunk, args.output_file, args.base_model_path, args.checkpoint_path)
         )
         p.start()
         processes.append(p)
@@ -212,8 +212,7 @@ def main():
     for p in processes:
         p.join()
 
-    # Run evaluation in a separate process to avoid any multiprocessing issues
-    logger.info("All GPUs finished processing. Running test suites...")
+    logger.info("All GPUs finished processing.")
 
     # Create a temporary script to run evaluation
     eval_script = """
