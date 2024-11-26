@@ -25,14 +25,14 @@ def load_model_and_tokenizer(student_model_name, teacher_model_name):
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
         load_in_4bit=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
 
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_model_name,
         load_in_4bit=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     )
 
@@ -146,7 +146,7 @@ def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataload
         # Compute probabilities
         teacher_probs = compute_probs(teacher_output.logits)
         student_probs = compute_probs(student_output.logits)
-
+       # breakpoint()
         # Compute cross-entropy loss
         ce_loss = cross_entropy_loss_index_based(
             labels, student_output.logits, student_tokenizer.pad_token_id
@@ -176,7 +176,7 @@ def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataload
 # Create a dataset class for CodeNala 
 
 class CodeNalaDataset(Dataset):
-    def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length=512):
+    def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
         """
         Args:
             path (str): Path to the folder containing train and test parquet files.
@@ -318,7 +318,7 @@ if __name__ == "__main__":
         path=args.dataset_path,
         student_tokenizer=student_tokenizer,
         teacher_tokenizer=teacher_tokenizer,
-        max_length=512
+        max_length=32
     )
 
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
