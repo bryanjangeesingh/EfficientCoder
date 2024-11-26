@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import json
 import time
 from tqdm import tqdm
@@ -10,25 +10,42 @@ import os
 import argparse
 
 # Change the path below to point to the human-eval directory
-sys.path.append("/home/brytech/human-eval/human_eval")
+sys.path.append("./human-eval/human_eval")
 from data import write_jsonl, read_problems
 from evaluation import evaluate_functional_correctness
 
 
 def load_model_and_tokenizer():
     """Load CodeLlama model and tokenizer"""
-    model_name = "codellama/CodeLlama-7b-Instruct-hf"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    config = AutoConfig.from_pretrained(
+        "codellama/CodeLlama-7b-hf",
+        torch_dtype=torch.float16,
+        cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct"
+    )
+    gpu_id = 0
+
+    print("Loading model with random weights for gpu", gpu_id)
+    model = AutoModelForCausalLM.from_config(config)
+    print("Model loaded")
+    # Load the checkpoint
+    checkpoint_path = "checkpoint_epoch_1.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    print("Checkpoints loaded")
+
+    # Load the state dict into the model
+    model.load_state_dict(checkpoint["student_state_dict"], strict=True)  # Load the student weights
+    print("Weights loaded")
+    torch.cuda.empty_cache()
+    print("Cache cleaned")
+    model.to(f"cuda:{gpu_id}")
+    print("Model moved")
+
+    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        device_map="auto",
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_instruct",
-    )
     return model, tokenizer
+
+    
 
 
 def extract_function_body(completion: str) -> str:
@@ -57,6 +74,15 @@ def remove_placeholder_comment(completion: str) -> str:
     cleaned_lines = [line for line in lines if line.strip() != "# Your code here"]
     return "\n".join(cleaned_lines).strip()
 
+def cut_string_at_newline(string):
+    # Search for the first occurrence of "\n" followed by any non-space character
+    match = re.search(r'\n(?=\S)', string)
+    if match:
+        # Slice the string up to and including the newline
+        return string[:match.start() + 1]
+    else:
+        # Return the original string if no match is found
+        return string
 
 def batch_generate_completions(
     prompts: List[str],
@@ -157,7 +183,7 @@ def main():
     print("Loading HumanEval problems...")
     problems = read_problems()
 
-    prompts = [format_prompt(problem) for problem in problems.values()]
+    prompts = [format_prompt(problem) for problem in problems.values()][:10]
     task_ids = list(problems.keys())
 
     samples = []

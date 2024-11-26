@@ -1,7 +1,8 @@
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import json
 import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+import json
+
 from tqdm import tqdm
 import torch.multiprocessing as mp
 import logging
@@ -10,6 +11,7 @@ import sys
 import numpy as np
 from typing import List, Dict
 from filelock import FileLock
+import gc
 
 # TODO: Change this so it points to the human eval folder (might already work for you)
 sys.path.append("./human-eval/human_eval")
@@ -31,13 +33,40 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
 
     # Initialize model and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
-        "codellama/CodeLlama-7b-hf",
+        "codeparrot/codeparrot-small",
+        load_in_4bit=True,
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
+        bnb_4bit_compute_dtype=torch.float16,
         # TODO: Change the path to use your username
         cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct"
     )
-    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
+    # config = AutoConfig.from_pretrained(
+    #     "codellama/CodeLlama-7b-hf",
+    #     torch_dtype=torch.float16,
+    #     cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct"
+    # )
+    
+    # print("Loading model with random weights for gpu", gpu_id)
+    # model = AutoModelForCausalLM.from_config(config)
+    # # Load the checkpoint
+    checkpoint_path = "student_epoch_1_2.0495.pt"
+    checkpoint = torch.load(checkpoint_path)
+    # print("Created model in cpu for gpu", gpu_id)
+    print(checkpoint.keys())
+    raise Exception("stop")
+
+    # # Load the state dict into the model
+    model.load_state_dict(checkpoint, strict=True)  # Load the student weights
+    # print("Checkpoint loaded for gpu", gpu_id)
+    # torch.cuda.empty_cache()
+    # gc.collect()
+    # model.to(f"cuda:{gpu_id}")
+    # print("Model moved successfully to gpu", gpu_id)
+    # torch.cuda.empty_cache()
+    # print(f"gpu {gpu_id} cache cleaned")
+    
+    tokenizer = AutoTokenizer.from_pretrained("codeparrot/codeparrot-small")
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -45,30 +74,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     completions = []
     for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
         # Fix the prompt formatting
-
-        # prompt = problem['prompt']  # 0.031
-
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"  # 0.156
-
-        # prompt = f"# Complete the following Python function (this is a coding exercise):\n\n{problem['prompt']}"  # 0.094
-        # prompt = f"# Complete the following Python exercise:\n\n{problem['prompt']}"  # 0.094
-        # prompt = f"# This is a coding exercise. Complete the following Python function:\n\n{problem['prompt']}" # 0.062
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    "  # 0.312s
-        
-        # prompt = f"# This Python function is correctly implemented.\n\n{problem['prompt']}" # 0.125
-        # prompt = f"# This Python function is an exercise and is correctly implemented.\n\n{problem['prompt']}" # 0.125
-
-        # prompt = f"# Complete the function:\n\n{problem['prompt']}"  # 0.062
-        # prompt = f"# Implement the function:\n\n{problem['prompt']}"  # 0.094
-        # prompt = f"# Implement the following Python function:\n\n{problem['prompt']}    " #0.062
-        # prompt = f"# Implement the following Python function:\n\n{problem['prompt']}    # TODO: Your code here\n    "  # 0.062
-        
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    \n    "  # 0.125
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here"  # 0.344s / 0.156mb / 0.14b
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here\n" # 0.156mb
-        # prompt = f"{problem['prompt']}    # Your code here" # 0.062mb
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here    "  # 0.312s / 0.141mb
-        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here"
+        # prompt = f"# Complete the following Python function:\n\n{problem['prompt']}    # Your code here\n"
         prompt = problem['prompt']
         try:
             inputs = tokenizer(
@@ -79,7 +85,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
                 max_length=4096,
                 return_attention_mask=True,
             ).to(f"cuda:{gpu_id}")
-
+            
             with torch.no_grad():
                 outputs = model.generate(
                     input_ids=inputs.input_ids,
@@ -172,6 +178,8 @@ def main():
     # Create and start processes
     processes = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
+        if gpu_id != 0:
+            continue
         p = mp.Process(
             target=evaluate_on_gpu, args=(gpu_id, problem_chunk, args.output_file)
         )
