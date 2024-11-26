@@ -3,11 +3,52 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-def compute_probs(logits):
-    '''
-    Compute the probabilities of the logits
-    '''
-    return torch.softmax(logits, dim=-1)
+
+def load_model_and_tokenizer(student_model_name, teacher_model_name):
+    """
+    Load the student and teacher models and their respective tokenizers.
+
+    Args:
+        student_model_name (str): Name or path of the student model.
+        teacher_model_name (str): Name or path of the teacher model.
+
+    Returns:
+        tuple: Contains the following elements:
+            - student (AutoModelForCausalLM): The loaded student model.
+            - teacher (AutoModelForCausalLM): The loaded teacher model.
+            - student_tokenizer (AutoTokenizer): Tokenizer for the student model.
+            - teacher_tokenizer (AutoTokenizer): Tokenizer for the teacher model.
+    """
+    student = AutoModelForCausalLM.from_pretrained(
+        student_model_name,
+        load_in_4bit=True,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+    teacher = AutoModelForCausalLM.from_pretrained(
+        teacher_model_name,
+        load_in_4bit=True,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+    student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
+
+    return (
+        student, 
+        teacher, 
+        student_tokenizer, 
+        teacher_tokenizer
+    )
+
+def compute_probs(logits, temperature=1.0):
+    """
+    Compute the probabilities of the logits with optional temperature scaling.
+    """
+    scaled_logits = logits / temperature
+    return torch.softmax(scaled_logits, dim=-1)
 
 def pad_distributions(p, q):
     '''
@@ -89,40 +130,52 @@ def compute_uld_loss(teacher_probs, student_probs, lambda_uld=1.0):
     return lambda_uld * wasserstein_loss
 
 
-for epoch in tqdm(range(num_epochs), desc="Epochs"):
-    student.train()
-    teacher.eval()
+def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataloader, optimizer, num_epochs, lambda_uld=0.1):
+    for epoch in tqdm(range(num_epochs), desc="Epochs"):
+        student.train()
+        teacher.eval()
 
-    for idx, batch in tqdm(enumerate(dataloader), desc=f"Epoch {epoch+1}", leave=False):
-        # Tokenize the ground truth labels with the student tokenizer
-        tokenized_labels = student_tokenizer(
-            batch["labels"],
-            truncation=True,
-            padding=True,
-            return_tensors="pt"
-        )["input_ids"].to(student.device)  # Ensure labels are on the same device as the model
+        for idx, batch in tqdm(enumerate(dataloader), desc=f"Epoch {epoch+1}", leave=False):
+            tokenized_labels = student_tokenizer(
+                batch["labels"],
+                truncation=True,
+                padding=True,
+                return_tensors="pt"
+            )["input_ids"].to(student.device)
 
-        with torch.no_grad():
-            teacher_output = teacher(batch)
+            with torch.no_grad():
+                teacher_output = teacher(batch)
 
-        student_output = student(batch)
+            student_output = student(batch)
 
-        # Compute probabilities
-        teacher_probs = compute_probs(teacher_output.logits)
-        student_probs = compute_probs(student_output.logits)
+            teacher_probs = compute_probs(teacher_output.logits)
+            student_probs = compute_probs(student_output.logits)
 
-        # Compute cross-entropy loss using tokenized labels
-        ce_loss = cross_entropy_loss_index_based(
-            tokenized_labels, student_output.logits, student_tokenizer.pad_token_id
-        )
+            ce_loss = cross_entropy_loss_index_based(
+                tokenized_labels, student_output.logits, student_tokenizer.pad_token_id
+            )
 
-        # Compute ULD loss
-        uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld=0.1)
-        total_loss = ce_loss + uld_loss
+            uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
+            total_loss = ce_loss + uld_loss
 
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
 
-        if idx % 10 == 0:
-            tqdm.write(f"Epoch {epoch+1}, Batch {idx+1}, Loss: {total_loss.item():.4f}")
+            if idx % 10 == 0:
+                tqdm.write(f"Epoch {epoch+1}, Batch {idx+1}, Loss: {total_loss.item():.4f}")
+
+
+# Create a dataset class for CodeNala 
+
+class CodeNalaDataset(Dataset):
+    def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length=512):
+        # path contains a folder containing a train parquet and a test parquet
+        self.path = path
+        self.student_tokenizer = student_tokenizer
+        self.teacher_tokenizer = teacher_tokenizer
+        self.max_length = max_length
+        
+
+
+
