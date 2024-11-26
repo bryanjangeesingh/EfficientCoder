@@ -5,11 +5,12 @@ STUDENT_NAME="WizardLMTeam/WizardCoder-Python-13B-V1.0"       # Replace with you
 TEACHER_NAME="codeparrot/codeparrot-small"          # Replace with your teacher model
 TEMPERATURE=1.0                  # Temperature for scaling logits
 LAMBDA_ULD=1.5                   # Weight for the Wasserstein loss term
-BATCH_SIZE=2                     # Batch size
-NUM_EPOCHS=3                     # Number of epochs
+BATCH_SIZE=16                   # Batch size
+NUM_EPOCHS=10                    # Number of epochs
 LEARNING_RATE=5e-5               # Learning rate
 LOAD_IN_4BIT="--load_in_4bit"    # Whether to use 4-bit precision
-DATASET_PATH="/home/brytech/datasets/conala/train.parquet" # Path to your training dataset
+TRAIN_DATASET_PATH="/home/brytech/datasets/conala/train.parquet" # Path to your training dataset
+VAL_DATASET_PATH="/home/brytech/datasets/conala/test.parquet"   # Path to your validation dataset
 SAVE_DIR="/home/brytech/train_uld_run/output_weights"        # Directory to save model weights
 
 # Ensure the output directory exists
@@ -25,5 +26,6 @@ python train_uld.py \
     --num_epochs "$NUM_EPOCHS" \
     --learning_rate "$LEARNING_RATE" \
     $LOAD_IN_4BIT \
-    --dataset_path "$DATASET_PATH" \
+    --train_dataset_path "$TRAIN_DATASET_PATH" \
+    --val_dataset_path "$VAL_DATASET_PATH" \
     --save_dir "$SAVE_DIR"

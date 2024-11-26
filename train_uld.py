@@ -25,14 +25,15 @@ def load_model_and_tokenizer(student_model_name, teacher_model_name):
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
         load_in_4bit=True,
-        torch_dtype=torch.bfloat16,
-        device_map="auto"
+        torch_dtype=torch.float16,
+        device_map="auto", 
+        bnb_4bit_compute_dtype=torch.float16 
     )
 
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_model_name,
         load_in_4bit=True,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
         device_map="auto"
     )
 
@@ -124,54 +125,119 @@ def compute_uld_loss(teacher_probs, student_probs, lambda_uld=1.0):
     # Return the combined ULD loss (note: cross-entropy is computed separately in training loop)
     return lambda_uld * wasserstein_loss
 
+def compute_perplexity(model, dataloader, tokenizer, device):
+    """
+    Compute perplexity of a model on the validation dataset.
+
+    Args:
+        model: The student model.
+        dataloader: Validation dataloader.
+        tokenizer: Tokenizer for the model.
+        device: Device for computation.
+
+    Returns:
+        tuple: (average loss, perplexity)
+    """
+    model.eval()
+    total_loss = 0.0
+    num_tokens = 0
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Validation", leave=False):
+            inputs = batch["student_input_ids"].to(device)
+            labels = batch["labels"].to(device)
+
+            # Forward pass with labels for automatic loss calculation
+            outputs = model(input_ids=inputs, labels=labels)
+            loss = outputs.loss  # Cross-entropy loss provided by HuggingFace models
+
+            # Accumulate loss and token count
+            total_loss += loss.item() * labels.size(1)  # Multiply by sequence length
+            num_tokens += labels.numel()
+
+    avg_loss = total_loss / num_tokens
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    return avg_loss, perplexity
+
+
 def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataloader, optimizer, num_epochs, save_dir, lambda_uld=0.1):
     os.makedirs(save_dir, exist_ok=True)
 
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
         student.train()
         teacher.eval()
-        total_loss = 0
 
-    for idx, batch in tqdm(enumerate(dataloader), desc=f"Epoch {epoch+1}", leave=False):
-        # Move batch inputs to the correct device
-        student_inputs = batch["student_input_ids"].to(student.device)
-        teacher_inputs = batch["teacher_input_ids"].to(teacher.device)
-        labels = batch["labels"].to(student.device)
+        epoch_ce_loss = 0.0  # Cross-Entropy loss accumulator
+        epoch_uld_loss = 0.0  # ULD loss accumulator
+        epoch_total_loss = 0.0  # Total loss accumulator
 
-        with torch.no_grad():
-            teacher_output = teacher(input_ids=teacher_inputs)
+        # Batch-wise progress bar
+        batch_progress = tqdm(enumerate(dataloader), desc=f"Epoch {epoch+1}", leave=False, total=len(dataloader))
 
-        student_output = student(input_ids=student_inputs)
+        for idx, batch in batch_progress:
+            # Move batch inputs to the correct device
+            student_inputs = batch["student_input_ids"].to(student.device)
+            teacher_inputs = batch["teacher_input_ids"].to(teacher.device)
+            labels = batch["labels"].to(student.device)
 
-        # Compute probabilities
-        teacher_probs = compute_probs(teacher_output.logits)
-        student_probs = compute_probs(student_output.logits)
-       # breakpoint()
-        # Compute cross-entropy loss
-        ce_loss = cross_entropy_loss_index_based(
-            labels, student_output.logits, student_tokenizer.pad_token_id
-        )
+            with torch.no_grad():
+                teacher_output = teacher(input_ids=teacher_inputs)
 
-        # Compute ULD loss
-        uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
-        loss = ce_loss + uld_loss
-        total_loss += loss.item()
+            student_output = student(input_ids=student_inputs)
 
-        # Backpropagation
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            # Compute probabilities
+            teacher_probs = compute_probs(teacher_output.logits)
+            student_probs = compute_probs(student_output.logits)
 
-        if idx % 10 == 0:
-            tqdm.write(f"Epoch {epoch+1}, Batch {idx+1}, Loss: {loss.item():.4f}")
+            # Compute Cross-Entropy Loss
+            ce_loss = cross_entropy_loss_index_based(
+                labels, student_output.logits, student_tokenizer.pad_token_id
+            )
 
-    avg_loss = total_loss / len(dataloader)
-    tqdm.write(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
-    
-    # Save weights after each epoch
-    torch.save(student.state_dict(), os.path.join(save_dir, f"student_epoch_{epoch+1}.pt"))
-    torch.save(optimizer.state_dict(), os.path.join(save_dir, f"optimizer_epoch_{epoch+1}.pt"))
+            # Compute ULD Loss
+            uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
 
+            # Total Loss
+            loss = ce_loss + uld_loss
+
+            # Check for NaN Loss
+            if torch.isnan(loss):
+                tqdm.write(f"Skipping Batch {idx} due to NaN loss.")
+                continue
+
+            # Backpropagation
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)  # Gradient Clipping
+            optimizer.step()
+
+            # Update epoch accumulators
+            epoch_ce_loss += ce_loss.item()
+            epoch_uld_loss += uld_loss.item()
+            epoch_total_loss += loss.item()
+
+            # Update tqdm progress bar
+            batch_progress.set_postfix({
+                "CE Loss": f"{ce_loss.item():.4f}",
+                "ULD Loss": f"{uld_loss.item():.4f}",
+                "Total Loss": f"{loss.item():.4f}"
+            })
+
+        # Calculate averages
+        avg_ce_loss = epoch_ce_loss / len(dataloader)
+        avg_uld_loss = epoch_uld_loss / len(dataloader)
+        avg_total_loss = epoch_total_loss / len(dataloader)
+
+        # Log epoch-level averages
+        tqdm.write(f"Epoch {epoch+1} completed. Avg CE Loss: {avg_ce_loss:.4f}, Avg ULD Loss: {avg_uld_loss:.4f}, Avg Total Loss: {avg_total_loss:.4f}")
+
+        # Validation step
+        avg_val_loss, perplexity = compute_perplexity(student, val_loader, student_tokenizer, student.device)
+        tqdm.write(f"Validation Results - Epoch {epoch+1}: Perplexity: {perplexity:.4f}, Avg Val Loss: {avg_val_loss:.4f}")
+
+        # Save weights after each epoch
+        torch.save(student.state_dict(), os.path.join(save_dir, f"student_epoch_{epoch+1}_{perplexity:.4f}.pt"))
+        torch.save(optimizer.state_dict(), os.path.join(save_dir, f"optimizer_epoch_{epoch+1}_{perplexity:.4f}.pt"))
 
 # Create a dataset class for CodeNala 
 
@@ -298,7 +364,8 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, required=True, help="Directory to save the trained student model weights.")
     
     # Dataset path
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to the training dataset (parquet file).")
+    parser.add_argument("--train_dataset_path", type=str, required=True, help="Path to the training dataset (parquet file).")
+    parser.add_argument("--val_dataset_path", type=str, required=True, help="Path to the validation dataset (parquet file).")
     
     return parser.parse_args()
 
@@ -314,17 +381,26 @@ if __name__ == "__main__":
     )
 
     # Prepare dataset and dataloader
-    dataset = CodeNalaDataset(
-        path=args.dataset_path,
+    train_dataset = CodeNalaDataset(
+        path=args.train_dataset_path,
         student_tokenizer=student_tokenizer,
         teacher_tokenizer=teacher_tokenizer,
         max_length=32
     )
 
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
+
+    val_dataset = CodeNalaDataset(
+        path=args.val_dataset_path,  # Path to validation parquet file
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
+        max_length=32  
+    )
+
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
     # Initialize optimizer
-    optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, eps=1e-4)
 
     # Train the model
     train_model(

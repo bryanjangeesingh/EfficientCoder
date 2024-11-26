@@ -3,13 +3,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import os
 from tqdm import tqdm
-import torch.multiprocessing as mp
 import logging
 import argparse
 import sys
 import numpy as np
 from typing import List, Dict
-from filelock import FileLock
 from safetensors.torch import load_file
 
 sys.path.append("/home/brytech/human-eval/human_eval")
@@ -18,115 +16,6 @@ from evaluation import evaluate_functional_correctness
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def setup_gpu_process(rank):
-    """Set up process-specific GPU settings."""
-    torch.cuda.set_device(rank)
-
-
-def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str, base_model_path: str, checkpoint_path: str):
-    """Evaluate problems on a specific GPU."""
-    setup_gpu_process(gpu_id)
-    logger.info(f"Starting evaluation on GPU {gpu_id}")
-
-    # Initialize tokenizer
-    logger.info(f"Loading tokenizer from base model path: {base_model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Load base model
-    logger.info(f"Loading base model from path: {base_model_path}")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model_path,
-        torch_dtype=torch.float16,
-        device_map=f"cuda:{gpu_id}",
-    )
-
-    # Load PEFT weights
-    if checkpoint_path.endswith(".safetensors"):
-        # Safetensors loading
-        logger.info(f"Loading PEFT weights from safetensors file {checkpoint_path}")
-        state_dict = load_file(checkpoint_path, device=f"cuda:{gpu_id}")
-        model.load_state_dict(state_dict, strict=False)  # Use strict=False to allow partial loading
-    else:
-        # Fallback to traditional PyTorch loading
-        logger.info(f"Loading PEFT weights from PyTorch file {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=f"cuda:{gpu_id}")
-        model.load_state_dict(checkpoint, strict=False)
-
-    completions = []
-    for problem in tqdm(problems, desc=f"GPU {gpu_id}", position=gpu_id):
-        # Fix the prompt formatting
-        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
-
-        try:
-            inputs = tokenizer(
-                prompt,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=4096,
-                return_attention_mask=True,
-            ).to(f"cuda:{gpu_id}")
-
-            with torch.no_grad():
-                outputs = model.generate(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    pad_token_id=tokenizer.pad_token_id,
-                    max_new_tokens=1024,
-                    do_sample=False,  # Ensure deterministic output
-                    eos_token_id=tokenizer.eos_token_id,
-                    num_return_sequences=1,
-                )
-
-            completion = tokenizer.decode(
-                outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-            ).strip()
-
-            # Clean up and format the generated completion
-            completion = extract_function_body(completion)
-            completion = remove_placeholder_comment(completion)
-
-            completions.append(
-                {"task_id": problem["task_id"], "completion": completion}
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Error processing task {problem['task_id']} on GPU {gpu_id}: {str(e)}"
-            )
-            completions.append({"task_id": problem["task_id"], "completion": ""})
-
-    # Create a file lock here, inside the process
-    lock = FileLock(f"{output_file}.lock")
-    with lock:
-        if os.path.exists(output_file):
-            # Read existing completions
-            try:
-                with open(output_file, "r") as f:
-                    existing_completions = [json.loads(line) for line in f]
-            except:
-                existing_completions = []
-
-            # Add new completions
-            all_completions = existing_completions + completions
-
-            # Create a dictionary to keep only the latest completion for each task_id
-            completion_dict = {c["task_id"]: c for c in all_completions}
-
-            # Convert back to list
-            final_completions = list(completion_dict.values())
-        else:
-            final_completions = completions
-
-        # Write completions
-        write_jsonl(output_file, final_completions)
-
-    # Clean up
-    del model
-    torch.cuda.empty_cache()
 
 def extract_function_body(completion: str) -> str:
     """Extract only the body of the function from the generated code."""
@@ -153,19 +42,107 @@ def remove_placeholder_comment(completion: str) -> str:
     cleaned_lines = [line for line in lines if line.strip() != "# Your code here"]
     return "\n".join(cleaned_lines).strip()
 
-def distribute_problems(problems: Dict, n_gpus: int) -> List[List[Dict]]:
-    """Distribute problems evenly across GPUs."""
-    problems_list = list(problems.values())
-    chunks = np.array_split(problems_list, n_gpus)
-    return [chunk.tolist() for chunk in chunks]
+def evaluate_model(problems: List[Dict], base_model_path: str, checkpoint_path: str, output_file: str, cache_dir: str, use_peft: bool = True):
+    """Evaluate model on the given problems."""
+    device = "cuda:0"
+    logger.info("Starting evaluation")
+
+    # Initialize tokenizer
+    logger.info(f"Loading tokenizer from base model: {base_model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model_path,
+        cache_dir=cache_dir,
+        trust_remote_code=True
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Load base model
+    logger.info(f"Loading base model: {base_model_path}")
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_path,
+        cache_dir=cache_dir,
+        torch_dtype=torch.float16,
+        device_map=device,
+        trust_remote_code=True
+    )
+
+    # Load PEFT weights if provided and use_peft is True
+    if checkpoint_path and use_peft:
+        if checkpoint_path.endswith(".safetensors"):
+            logger.info(f"Loading PEFT weights from safetensors file {checkpoint_path}")
+            state_dict = load_file(checkpoint_path, device=device)
+            model.load_state_dict(state_dict, strict=False)
+        else:
+            logger.info(f"Loading PEFT weights from PyTorch file {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint, strict=False)
+    elif not use_peft:
+        logger.info("Skipping PEFT weights - running with base model only")
+
+    completions = []
+    for problem in tqdm(problems, desc="Evaluating"):
+        prompt = f"# Complete the following Python function:\n\n{problem['prompt']}"
+
+        try:
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=4096,
+                return_attention_mask=True,
+            ).to(device)
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    pad_token_id=tokenizer.pad_token_id,
+                    max_new_tokens=1024,
+                    do_sample=False,
+                    eos_token_id=tokenizer.eos_token_id,
+                    num_return_sequences=1,
+                )
+
+            completion = tokenizer.decode(
+                outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
+            ).strip()
+
+            completion = extract_function_body(completion)
+            completion = remove_placeholder_comment(completion)
+
+            completions.append(
+                {"task_id": problem["task_id"], "completion": completion}
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing task {problem['task_id']}: {str(e)}")
+            completions.append({"task_id": problem["task_id"], "completion": ""})
+
+    # Save completions
+    write_jsonl(output_file, completions)
+    logger.info(f"Saved completions to {output_file}")
+
+    # Clean up
+    del model
+    torch.cuda.empty_cache()
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Evaluate language model on coding tasks")
     parser.add_argument(
-        "--gpu_ids",
+        "--base_model_path",
         type=str,
-        default="0,1,2,3",
-        help="Comma-separated list of GPU IDs to use",
+        required=False,
+        help="Path or name of the base model",
+        default="codellama/CodeLlama-7b-hf"  # Using CodeLlama model
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        required=False,
+        help="Path to the checkpoint file",
+        default='/home/brytech/EfficientCoder/adapter_model.safetensors'
     )
     parser.add_argument(
         "--output_file",
@@ -174,45 +151,44 @@ def main():
         help="Path to save the completions",
     )
     parser.add_argument(
-        "--base_model_path",
+        "--cache_dir",
         type=str,
-        required=True,
-        help="Path to the base model directory",
+        default="./model_cache",
+        help="Directory to cache the downloaded models",
     )
     parser.add_argument(
-        "--checkpoint_path",
-        type=str,
-        required=True,
-        help="Path to the checkpoint file",
+        "--no_peft",
+        action="store_true",
+        help="If set, run without loading PEFT weights (base model only)",
     )
     args = parser.parse_args()
 
-    # Set up GPU IDs
-    gpu_ids = [int(x) for x in args.gpu_ids.split(",")]
-    n_gpus = len(gpu_ids)
+    # Create cache directory if it doesn't exist
+    os.makedirs(args.cache_dir, exist_ok=True)
 
     # Load HumanEval problems
     problems = read_problems()
-    problem_chunks = distribute_problems(problems, n_gpus)
+    # Convert problems dictionary to list
+    problems_list = [
+        {
+            "task_id": task_id,
+            "prompt": problem["prompt"],
+            "entry_point": problem["entry_point"]
+        }
+        for task_id, problem in problems.items()
+    ]
 
-    # Initialize multiprocessing method
-    mp.set_start_method("spawn", force=True)
+    # Run evaluation
+    evaluate_model(
+        problems_list, 
+        args.base_model_path, 
+        args.checkpoint_path, 
+        args.output_file, 
+        args.cache_dir,
+        not args.no_peft  # Pass use_peft flag
+    )
 
-    # Create and start processes
-    processes = []
-    for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
-        p = mp.Process(
-            target=evaluate_on_gpu, 
-            args=(gpu_id, problem_chunk, args.output_file, args.base_model_path, args.checkpoint_path)
-        )
-        p.start()
-        processes.append(p)
-
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
-
-    logger.info("All GPUs finished processing.")
+    logger.info("Model evaluation completed. Running final evaluation...")
 
     # Create a temporary script to run evaluation
     eval_script = """
@@ -239,9 +215,6 @@ if __name__ == "__main__":
 
     # Run evaluation script
     os.system(f"{sys.executable} run_eval.py")
-
-    # Clean up
-    os.remove("run_eval.py")
 
 if __name__ == "__main__":
     main()
