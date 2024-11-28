@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # Define default argument values
-STUDENT_NAME="WizardLMTeam/WizardCoder-Python-13B-V1.0"       # Replace with your student model
-TEACHER_NAME="codeparrot/codeparrot-small"          # Replace with your teacher model
-TEMPERATURE=1.0                  # Temperature for scaling logits
-LAMBDA_ULD=1.5                   # Weight for the Wasserstein loss term
-BATCH_SIZE=16                   # Batch size
-NUM_EPOCHS=10                    # Number of epochs
-LEARNING_RATE=5e-5               # Learning rate
+STUDENT_NAME="codellama/CodeLlama-7b-hf"       # Replace with your student model
+TEACHER_NAME="WizardLMTeam/WizardCoder-Python-13B-V1.0"          # Replace with your teacher model
+TEMPERATURE=2.0                  # Temperature for scaling logits
+LAMBDA_ULD=0.00003123438281      # Weight for the Wasserstein loss term
+BATCH_SIZE=64                  # Batch size
+NUM_EPOCHS=30                    # Number of epochs
+LEARNING_RATE=1e-5               # Learning rate
 LOAD_IN_4BIT="--load_in_4bit"    # Whether to use 4-bit precision
-TRAIN_DATASET_PATH="/home/brytech/datasets/conala/train.parquet" # Path to your training dataset
-VAL_DATASET_PATH="/home/brytech/datasets/conala/test.parquet"   # Path to your validation dataset
-SAVE_DIR="/home/brytech/train_uld_run/output_weights"        # Directory to save model weights
+TRAIN_DATASET_PATH="/nobackup/users/brytech/datasets/conala/mined/train_split.parquet"
+VAL_DATASET_PATH="/nobackup/users/brytech/datasets/conala/test.parquet"
+SAVE_DIR="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights"    # Directory to save model weights
 
 # Ensure the output directory exists
 mkdir -p $SAVE_DIR
