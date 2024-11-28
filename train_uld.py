@@ -24,17 +24,16 @@ def load_model_and_tokenizer(student_model_name, teacher_model_name):
     """
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
-        load_in_4bit=True,
         torch_dtype=torch.float16,
         device_map="auto", 
-        bnb_4bit_compute_dtype=torch.float16 
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
     )
 
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_model_name,
-        load_in_4bit=True,
         torch_dtype=torch.float16,
-        device_map="auto"
+        device_map="auto",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
     )
 
     student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
@@ -241,7 +240,7 @@ def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataload
 
 # Create a dataset class for CodeNala 
 
-class CodeNalaDataset(Dataset):
+class CodeSearchNetDataset(Dataset):
     def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
         """
         Args:
@@ -268,34 +267,24 @@ class CodeNalaDataset(Dataset):
         """
         row = self.data.iloc[idx]
 
-        # Check if rewritten_intent is problematic
-        rewritten_intent = row.get("rewritten_intent", None)
-        if (
-            rewritten_intent is None or  # Check if null
-            rewritten_intent.strip() == "" or  # Check if empty string
-            isinstance(rewritten_intent, float) and pd.isnull(rewritten_intent)  # Handle NaN
-        ):
-            # Switch to intent if rewritten_intent is problematic
-            rewritten_intent = row.get("intent", None)
-            if (
-                rewritten_intent is None or  # Check if intent is null
-                rewritten_intent.strip() == "" or  # Check if empty string
-                isinstance(rewritten_intent, float) and pd.isnull(rewritten_intent)  # Handle NaN
-            ):
-                # Skip this row if intent is also problematic
-                return None
+        # Check if prompt_for_training is problematic
+        prompt_for_training = row.get("prompt_for_training", None)
+               
+        # TODO: change this if you change the models
+        student_instructions = f"# Complete the following Python function:{prompt_for_training}\n\n" # this instruction is for codellama/codellama-7b-instruct
 
-        # Tokenize intent for both student and teacher models
+        teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{prompt_for_training}\n\n### Response:" # this instruction is for WizardCoder
+
         try:
             student_tokenized = self.student_tokenizer(
-                rewritten_intent,
+                student_instructions,
                 max_length=self.max_length,
                 padding="max_length",
                 truncation=True,
                 return_tensors="pt"
             )
             teacher_tokenized = self.teacher_tokenizer(
-                rewritten_intent,
+                teacher_instructions,
                 max_length=self.max_length,
                 padding="max_length",
                 truncation=True,
@@ -305,15 +294,15 @@ class CodeNalaDataset(Dataset):
             # Skip row if tokenization fails
             return None
 
-        # Tokenize snippet (used as labels)
-        snippet = row.get("snippet", None)
+        # Tokenize code snippet (used as labels)
+        snippet = row.get("code", None)
         if snippet is None or snippet.strip() == "":
             return None
 
         try:
             labels = self.student_tokenizer(
                 snippet,
-                max_length=self.max_length,
+                max_length=self.max_length, # TODO: check the dataset to see how much tokens the labels are 
                 padding="max_length",
                 truncation=True,
                 return_tensors="pt"
@@ -381,20 +370,20 @@ if __name__ == "__main__":
     )
 
     # Prepare dataset and dataloader
-    train_dataset = CodeNalaDataset(
+    train_dataset = CodeSearchNetDataset(
         path=args.train_dataset_path,
         student_tokenizer=student_tokenizer,
         teacher_tokenizer=teacher_tokenizer,
-        max_length=32
+        max_length=1024
     )
 
     dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
 
-    val_dataset = CodeNalaDataset(
+    val_dataset = CodeSearchNetDataset(
         path=args.val_dataset_path,  # Path to validation parquet file
         student_tokenizer=student_tokenizer,
         teacher_tokenizer=teacher_tokenizer,
-        max_length=32  
+        max_length=1024  
     )
 
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
