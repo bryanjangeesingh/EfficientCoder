@@ -125,7 +125,7 @@ def main():
     # Initialize the distiller
     from train import MultiTeacherDistillation
     distiller = MultiTeacherDistillation(
-        teacher1_model_name="codellama/CodeLlama-13b-Instruct-hf",
+        teacher1_model_name="WizardLMTeam/WizardCoder-Python-13B-V1.0",
         student_model_name="codellama/CodeLlama-7b-hf",
         temperature=args.temperature,
         num_workers=args.num_workers,

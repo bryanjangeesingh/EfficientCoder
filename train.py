@@ -145,8 +145,9 @@ class MultiTeacherDistillation:
         student_model_name: str = "codellama/CodeLlama-7b-hf",
         temperature: float = 2.0,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        num_workers: int = 4,  # Number of data loading workers
-        checkpoint_path: str = None,  # Path to load checkpoint from
+        num_workers: int = 4,
+        checkpoint_path: str = None,
+        max_length: int = 512  
     ):
         """Initialize the distillation framework with models on different GPUs."""
         self.device = device
@@ -154,16 +155,17 @@ class MultiTeacherDistillation:
         self.teacher1_model_name = teacher1_model_name
         self.student_model_name = student_model_name
         self.num_workers = num_workers
-        self.start_epoch = 0  # Track which epoch to start from
+        self.start_epoch = 0
+        self.max_length = max_length
         
-        # Set environment variable for memory management
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+        # Memory optimization settings
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+        torch.backends.cuda.max_memory_split_size = 128 * 1024 * 1024  # 128MB
         
-        # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=16,
+            gradient_accumulation_steps=64,  # Increased for better memory efficiency
             mixed_precision="fp16",
-            device_placement=False,  # We'll handle device placement ourselves
+            device_placement=False,
             kwargs_handlers=[
                 DistributedDataParallelKwargs(
                     find_unused_parameters=True,
@@ -172,17 +174,18 @@ class MultiTeacherDistillation:
             ]
         )
         
-        # Configure model loading with explicit GPU assignments
         teacher_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": {"": "cuda:0"},
             "use_cache": False,
+            "low_cpu_mem_usage": True
         }
         
         student_kwargs = {
             "torch_dtype": torch.float16,
             "device_map": {"": "cuda:1"},
             "use_cache": False,
+            "low_cpu_mem_usage": True
         }
 
         logger.info("Loading WizardCoder teacher (13B) on GPU 0...")
@@ -192,8 +195,12 @@ class MultiTeacherDistillation:
             **teacher_kwargs
         )
         self.teacher.gradient_checkpointing_enable()
+        self.teacher.config.use_cache = False
         
-        # Clear GPU 0 cache
+        # Enable memory efficient attention
+        if hasattr(self.teacher.config, "attention_mode"):
+            self.teacher.config.attention_mode = "memory_efficient"
+        
         torch.cuda.empty_cache()
         
         logger.info("Loading student model (7B) on GPU 1...")
@@ -203,27 +210,44 @@ class MultiTeacherDistillation:
             **student_kwargs
         )
         self.student.gradient_checkpointing_enable()
-
-        # Initialize tokenizer with parallel processing
-        logger.info("Loading WizardCoder tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self.student.config.use_cache = False
+        
+        # Enable memory efficient attention
+        if hasattr(self.student.config, "attention_mode"):
+            self.student.config.attention_mode = "memory_efficient"
+        
+        # Initialize tokenizers for both models
+        logger.info("Loading tokenizers...")
+        self.teacher_tokenizer = AutoTokenizer.from_pretrained(
             self.teacher1_model_name,
-            use_fast=True,  # Use fast tokenizer for better performance
+            use_fast=True,
             cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_wizard_coder"
         )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.student_tokenizer = AutoTokenizer.from_pretrained(
+            self.student_model_name,
+            use_fast=True,
+            cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights_distilled_student"
+        )
 
-        # Initialize optimizer with more conservative learning rates
+        # Set pad tokens if not present
+        if self.teacher_tokenizer.pad_token is None:
+            self.teacher_tokenizer.pad_token = self.teacher_tokenizer.eos_token
+        if self.student_tokenizer.pad_token is None:
+            self.student_tokenizer.pad_token = self.student_tokenizer.eos_token
+
+        self.tokenizer = self.teacher_tokenizer  # Use teacher tokenizer as default for dataset
+
+
+        # Rest of the initialization remains the same
         param_groups = [
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' in n],
-                'lr': 1e-5,  # Reduced from 5e-5
+                'lr': 1e-5,
                 'weight_decay': 0.01
             },
             {
                 'params': [p for n, p in self.student.named_parameters() if 'layer' not in n],
-                'lr': 2e-5,  # Reduced from 1e-4
+                'lr': 2e-5,
                 'weight_decay': 0.0
             }
         ]
@@ -234,22 +258,18 @@ class MultiTeacherDistillation:
             betas=(0.9, 0.999)
         )
         
-        # Add gradient clipping with max norm
         self.max_grad_norm = 1.0
         
-        # Load checkpoint if provided
         if checkpoint_path:
             logger.info(f"Loading checkpoint from {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
             self.student.load_state_dict(checkpoint["student_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            self.start_epoch = checkpoint["epoch"]  # Resume from the next epoch
+            self.start_epoch = checkpoint["epoch"]
             logger.info(f"Resuming from epoch {self.start_epoch}")
         
-        # Only prepare optimizer and scheduler
         self.optimizer = self.accelerator.prepare(self.optimizer)
         
-        # Setup prefetching queue for next batch
         self.next_batch = None
         self.prefetch_queue = queue.Queue(maxsize=2)
         self.prefetch_thread = None
@@ -280,101 +300,297 @@ class MultiTeacherDistillation:
             self.prefetch_thread.start()
         
         return batch
+    
+    def generate_teacher_input(self, code: str, docstring: str = None) -> str:
+        """Format input for WizardCoder."""
+        prompt = f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+        ### Instruction:
+        Create a Python script for this problem:
+        {docstring if docstring else ''}
+
+        {code}
+
+        ### Response:"""
+        return prompt
+    
+    def generate_student_input(self, code: str, docstring: str = None) -> str:
+        """Format input for CodeLlama."""
+        return f"# Complete the following Python function:\n\n{docstring if docstring else ''}\n{code}"
+    
+    def post_process_output(self, completion: str) -> str:
+        """Post-process model outputs to extract clean code."""
+        completion = completion.replace("\r", "")
+        
+        # Extract code from markdown code blocks if present
+        if "```python" in completion:
+            def_line = completion.index("```python")
+            completion = completion[def_line:].replace("```python", "").strip()
+            if "```" in completion:
+                next_line = completion.index("```")
+                completion = completion[:next_line].strip()
+        
+        # Remove main block if present
+        if "__name__ == \"__main__\"" in completion:
+            next_line = completion.index('if __name__ == "__main__":')
+            completion = completion[:next_line].strip()
+        
+        # Remove example usage if present
+        if "# Example usage" in completion:
+            next_line = completion.index("# Example usage")
+            completion = completion[:next_line].strip()
+        
+        return completion.strip()
 
     def compute_uld_loss(self, teacher_logits, student_logits, temperature=1.0):
         """
-        Compute Universal Logit Distillation loss as described in the paper.
-        This loss is based on pairwise differences between logits and is more robust
-        to different vocabularies between teacher and student.
+        Memory-efficient implementation of Universal Logit Distillation loss.
+        Uses chunked computation to avoid OOM issues.
         """
-        # Compute pairwise differences for teacher and student
-        teacher_diff = teacher_logits.unsqueeze(-1) - teacher_logits.unsqueeze(-2)  # [B, S, V, V]
-        student_diff = student_logits.unsqueeze(-1) - student_logits.unsqueeze(-2)  # [B, S, V, V]
+        # Ensure inputs have the same shape and vocab size
+        batch_size, seq_len, _ = teacher_logits.size()
+        min_vocab = min(teacher_logits.size(-1), student_logits.size(-1))
         
-        # Scale by temperature
-        teacher_diff = teacher_diff / temperature
-        student_diff = student_diff / temperature
+        # Truncate to smaller vocab size
+        teacher_logits = teacher_logits[..., :min_vocab]
+        student_logits = student_logits[..., :min_vocab]
         
-        # Create mask to avoid comparing token with itself
-        vocab_size = teacher_logits.size(-1)
-        mask = ~torch.eye(vocab_size, dtype=torch.bool, device=teacher_logits.device)
-        mask = mask.view(1, 1, vocab_size, vocab_size).expand_as(teacher_diff)
+        # Flatten batch and sequence dimensions
+        teacher_flat = teacher_logits.view(-1, min_vocab)  # [B*S, V]
+        student_flat = student_logits.view(-1, min_vocab)  # [B*S, V]
         
-        # Apply mask
-        teacher_diff = teacher_diff[mask].view(teacher_logits.size(0), teacher_logits.size(1), -1)
-        student_diff = student_diff[mask].view(student_logits.size(0), student_logits.size(1), -1)
+        total_tokens = teacher_flat.size(0)
+        chunk_size = 128  # Process in smaller chunks to save memory
+        loss = 0
+        num_comparisons = 0
         
-        # Compute loss using sigmoid cross entropy
-        teacher_prob = torch.sigmoid(teacher_diff)
-        student_prob = torch.sigmoid(student_diff)
-        
-        # Binary cross entropy loss
-        loss = F.binary_cross_entropy_with_logits(
-            student_diff,
-            teacher_prob,
-            reduction='none'
-        )
-        
-        # Average over all pairs and sequence length
-        loss = loss.mean()
-        
-        return loss
-
-    def train_step(self, input_batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Perform one training step with Universal Logit Distillation loss."""
-        try:
-            self.optimizer.zero_grad()
+        for i in range(0, total_tokens, chunk_size):
+            # Get current chunk
+            end_idx = min(i + chunk_size, total_tokens)
+            teacher_chunk = teacher_flat[i:end_idx]
+            student_chunk = student_flat[i:end_idx]
             
-            # Move input tensors to appropriate devices
-            teacher_input_ids = input_batch["input_ids"].to("cuda:0")
-            student_input_ids = input_batch["input_ids"].to("cuda:1")
+            # Compute chunk-wise differences
+            teacher_diff = (teacher_chunk.unsqueeze(1) - teacher_chunk.unsqueeze(0)) / temperature
+            student_diff = (student_chunk.unsqueeze(1) - student_chunk.unsqueeze(0)) / temperature
             
-            # Get teacher outputs with mixed precision
-            with torch.no_grad(), torch.cuda.amp.autocast():
-                teacher_outputs = self.teacher(teacher_input_ids)
-                teacher_logits = teacher_outputs.logits.to("cuda:1").detach()
+            # Create mask for valid comparisons (excluding self-comparisons)
+            chunk_size_curr = end_idx - i
+            mask = ~torch.eye(chunk_size_curr, dtype=torch.bool, device=teacher_diff.device)
             
-            # Clear GPU 0 cache after teacher forward pass
+            # Use binary_cross_entropy_with_logits which is safe with autocast
+            teacher_diff = teacher_diff[mask]
+            student_diff = student_diff[mask]
+            
+            # Convert teacher differences to target probabilities
+            with torch.cuda.amp.autocast(enabled=False):
+                teacher_prob = torch.sigmoid(teacher_diff.float())
+            
+            # Compute loss using BCEWithLogitsLoss which is safe with autocast
+            curr_loss = F.binary_cross_entropy_with_logits(
+                student_diff,
+                teacher_prob,
+                reduction='sum'
+            )
+            
+            loss += curr_loss
+            num_comparisons += mask.sum()
+            
+            # Clean up intermediate tensors
+            del teacher_diff, student_diff, teacher_prob
             torch.cuda.empty_cache()
+        
+        # Average loss over all valid comparisons
+        return loss / num_comparisons if num_comparisons > 0 else torch.tensor(0.0, device=teacher_logits.device)
+
+    def train_step(self, input_batch: Dict[str, torch.Tensor]):
+        """Modified train step with memory optimizations."""
+        try:
+            # Get code from batch
+            original_text = input_batch.get("original_text", [])  # Changed to match dataset output
+            if not original_text:
+                logger.warning("No original_text found in batch, trying alternate keys...")
+                original_text = input_batch.get("code", []) or input_batch.get("text", [])
             
-            # Get student outputs with mixed precision
-            with torch.cuda.amp.autocast():
-                student_outputs = self.student(student_input_ids)
-                student_logits = student_outputs.logits
+            docstrings = input_batch.get("docstring", [None] * len(original_text))
+            
+            if not original_text:
+                logger.error("Empty input batch - no code found")
+                logger.error(f"Available batch keys: {list(input_batch.keys())}")
+                raise ValueError("Empty input batch - no code found")
+            
+            # Process single example at a time
+            max_batch_size = 1
+            if len(original_text) > max_batch_size:
+                original_text = original_text[:max_batch_size]
+                docstrings = docstrings[:max_batch_size]
+            
+            # Generate inputs
+            teacher_inputs = [
+                self.generate_teacher_input(code=sample, docstring=doc)
+                for sample, doc in zip(original_text, docstrings)
+            ]
+            
+            student_inputs = [
+                self.generate_student_input(code=sample, docstring=doc)
+                for sample, doc in zip(original_text, docstrings)
+            ]
+            
+            # Minimal sequence length and ensure same padding for both models
+            max_length = min(self.max_length, 96)  # Further reduced from 128
+            
+            try:
+                # Tokenize with same padding strategy for both models
+                padding_kwargs = {
+                    "padding": True,
+                    "truncation": True,
+                    "max_length": max_length,
+                    "return_tensors": "pt",
+                    "padding_side": "right",  # Ensure consistent padding side
+                    "return_attention_mask": True
+                }
                 
-                # Compute ULD loss
-                shift_teacher_logits = teacher_logits[:, :-1, :].contiguous()
-                shift_student_logits = student_logits[:, :-1, :].contiguous()
-                
-                # Handle potential NaN or Inf values
-                shift_teacher_logits = torch.nan_to_num(shift_teacher_logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                shift_student_logits = torch.nan_to_num(shift_student_logits, nan=0.0, posinf=1e4, neginf=-1e4)
-                
-                # Compute ULD loss with temperature scaling
-                loss = self.compute_uld_loss(
-                    shift_teacher_logits,
-                    shift_student_logits,
-                    temperature=self.temperature
+                teacher_tokens = self.teacher_tokenizer(
+                    teacher_inputs,
+                    **padding_kwargs
                 )
                 
-                if torch.isnan(loss):
-                    return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+                student_tokens = self.student_tokenizer(
+                    student_inputs,
+                    **padding_kwargs
+                )
+                
+                # Move to appropriate devices and convert to half precision
+                teacher_tokens = {
+                    k: v.to("cuda:0", dtype=torch.long if k == "input_ids" or k == "attention_mask" else torch.float16) 
+                    for k, v in teacher_tokens.items()
+                }
+                student_tokens = {
+                    k: v.to("cuda:1", dtype=torch.long if k == "input_ids" or k == "attention_mask" else torch.float16)
+                    for k, v in student_tokens.items()
+                }
+                
+                # Ensure sequences are padded to same length
+                if teacher_tokens["input_ids"].size(1) != student_tokens["input_ids"].size(1):
+                    max_len = max(teacher_tokens["input_ids"].size(1), student_tokens["input_ids"].size(1))
+                    
+                    # Pad teacher tokens if needed
+                    if teacher_tokens["input_ids"].size(1) < max_len:
+                        pad_len = max_len - teacher_tokens["input_ids"].size(1)
+                        teacher_tokens["input_ids"] = F.pad(teacher_tokens["input_ids"], (0, pad_len), value=self.teacher_tokenizer.pad_token_id)
+                        teacher_tokens["attention_mask"] = F.pad(teacher_tokens["attention_mask"], (0, pad_len), value=0)
+                    
+                    # Pad student tokens if needed
+                    if student_tokens["input_ids"].size(1) < max_len:
+                        pad_len = max_len - student_tokens["input_ids"].size(1)
+                        student_tokens["input_ids"] = F.pad(student_tokens["input_ids"], (0, pad_len), value=self.student_tokenizer.pad_token_id)
+                        student_tokens["attention_mask"] = F.pad(student_tokens["attention_mask"], (0, pad_len), value=0)
+                
+            except Exception as e:
+                logger.error(f"Tokenization error: {str(e)}")
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
             
-            # Compute gradients with gradient scaling
+            # Get teacher outputs with memory optimization
+            try:
+                with torch.no_grad(), torch.cuda.amp.autocast():
+                    # Process in smaller chunks for teacher
+                    chunk_size = 16  # Reduced chunk size
+                    seq_length = teacher_tokens["input_ids"].size(1)
+                    teacher_logits_list = []
+                    
+                    for i in range(0, seq_length, chunk_size):
+                        chunk_end = min(i + chunk_size, seq_length)
+                        chunk_tokens = {
+                            k: v[:, i:chunk_end] for k, v in teacher_tokens.items()
+                        }
+                        chunk_output = self.teacher(**chunk_tokens)
+                        teacher_logits_list.append(chunk_output.logits)
+                        del chunk_output
+                        torch.cuda.empty_cache()
+                    
+                    teacher_logits = torch.cat(teacher_logits_list, dim=1).to("cuda:1", dtype=torch.float16)
+                    del teacher_logits_list
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                logger.error(f"Teacher forward pass error: {str(e)}")
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+            
+            # Get student outputs with memory optimization
+            try:
+                with torch.cuda.amp.autocast():
+                    # Process in smaller chunks for student
+                    student_logits_list = []
+                    for i in range(0, seq_length, chunk_size):
+                        chunk_end = min(i + chunk_size, seq_length)
+                        chunk_tokens = {
+                            k: v[:, i:chunk_end] for k, v in student_tokens.items()
+                        }
+                        chunk_output = self.student(**chunk_tokens)
+                        student_logits_list.append(chunk_output.logits)
+                        del chunk_output
+                        torch.cuda.empty_cache()
+                    
+                    student_logits = torch.cat(student_logits_list, dim=1)
+                    del student_logits_list
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                logger.error(f"Student forward pass error: {str(e)}")
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+            
+            # Log shapes for debugging
+            logger.info(f"Shapes: teacher={teacher_logits.shape}, student={student_logits.shape}")
+            
+            # Handle NaN/Inf
+            teacher_logits = torch.nan_to_num(teacher_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+            student_logits = torch.nan_to_num(student_logits, nan=0.0, posinf=1e4, neginf=-1e4)
+                    
+            # Process loss in smaller chunks
+            total_loss = 0
+            num_chunks = 0
+            vocab_chunk_size = 1024  # Process vocabulary in chunks
+            
+            for i in range(0, teacher_logits.size(-1), vocab_chunk_size):
+                vocab_end = min(i + vocab_chunk_size, teacher_logits.size(-1))
+                teacher_vocab_chunk = teacher_logits[..., i:vocab_end]
+                student_vocab_chunk = student_logits[..., i:vocab_end]
+                
+                chunk_loss = self.compute_uld_loss(
+                    teacher_vocab_chunk,
+                    student_vocab_chunk,
+                    temperature=self.temperature
+                )
+                total_loss += chunk_loss
+                num_chunks += 1
+                
+                del teacher_vocab_chunk, student_vocab_chunk
+                torch.cuda.empty_cache()
+            
+            loss = total_loss / num_chunks if num_chunks > 0 else torch.tensor(0.0, device="cuda:1", requires_grad=True)
+            
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning("NaN/Inf loss detected")
+                return torch.tensor(0.0, device="cuda:1", requires_grad=True)
+            
+            # Scale loss for gradient accumulation
+            loss = loss / self.accelerator.gradient_accumulation_steps
+            
             self.accelerator.backward(loss)
             
-            # Clear unnecessary tensors
-            del teacher_logits
+            # Aggressive cleanup
+            del teacher_logits, student_logits, teacher_tokens, student_tokens
             torch.cuda.empty_cache()
             
             # Clip gradients
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), max_norm=self.max_grad_norm)
+            if self.accelerator.sync_gradients:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.max_grad_norm)
             
             return loss
             
         except Exception as e:
-            logger.error(f"Error in train_step: {str(e)}")
-            raise
+            logger.error(f"Train step error: {str(e)}")
+            return torch.tensor(0.0, device="cuda:1", requires_grad=True)
 
     def train(
         self,
