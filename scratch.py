@@ -1,24 +1,46 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, T5ForConditionalGeneration
-import torch
+import re
 
-# Load the model and tokenizer
-checkpoint = "Salesforce/codet5p-2b"
-device = "cuda"
+def cut_string_at_first_function_end(input_string):
+    # Match up to the first newline followed by a non-space or non-newline character
+    match = re.search(r'\n[^\s\n]', input_string)
+    if match:
+        # Cut the string up to the match start
+        return input_string[:match.start()]
+    return input_string  # If no match, return the original string
 
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-# model = T5ForConditionalGeneration.from_pretrained(
-#     "Salesforce/codet5p-2b",
-#     torch_dtype=torch.float16,
-#     device_map="auto",
-#     cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct",
-#     max_memory={i: "24GB" for i in range(torch.cuda.device_count())},  # Reserve memory for other models
-# )
+# Example usage
+example_prompt = """def my_function():
+    print("This is my function")
+      
+    print("e")
+    return True
+def another_function():
+    print("This is another function")
+"""
 
-# Print the vocabulary size
-print("Vocabulary size:", tokenizer.vocab_size)
+result = cut_string_at_first_function_end(example_prompt)
+print(result)
+# from transformers import AutoModelForCausalLM, AutoTokenizer, T5ForConditionalGeneration
+# import torch
 
-# Print the vocabulary list (tokens and their indices)
-vocab = tokenizer.get_vocab()
+# # Load the model and tokenizer
+# checkpoint = "Salesforce/codet5p-2b"
+# device = "cuda"
+
+# tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+# # model = T5ForConditionalGeneration.from_pretrained(
+# #     "Salesforce/codet5p-2b",
+# #     torch_dtype=torch.float16,
+# #     device_map="auto",
+# #     cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct",
+# #     max_memory={i: "24GB" for i in range(torch.cuda.device_count())},  # Reserve memory for other models
+# # )
+
+# # Print the vocabulary size
+# print("Vocabulary size:", tokenizer.vocab_size)
+
+# # Print the vocabulary list (tokens and their indices)
+# vocab = tokenizer.get_vocab()
 # print("Vocabulary tokens and their indices:")
 # for token, index in vocab.items():
 #     print(f"Token: {token}, Index: {index}")

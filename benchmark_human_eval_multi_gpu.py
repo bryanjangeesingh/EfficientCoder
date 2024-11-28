@@ -31,13 +31,14 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     setup_gpu_process(gpu_id)
     logger.info(f"Starting evaluation on GPU {gpu_id}")
 
+    model_name = "codellama/CodeLlama-7b-hf"
     # Initialize model and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
-        "codeparrot/codeparrot-small",
-        load_in_4bit=True,
+        model_name,
+        # load_in_4bit=True,
         torch_dtype=torch.float16,
         device_map=f"cuda:{gpu_id}",
-        bnb_4bit_compute_dtype=torch.float16,
+        # bnb_4bit_compute_dtype=torch.float16,
         # TODO: Change the path to use your username
         cache_dir="/nobackup/users/danbq/projects/condas/nlp_4gpus/weights_instruct"
     )
@@ -50,14 +51,13 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     # print("Loading model with random weights for gpu", gpu_id)
     # model = AutoModelForCausalLM.from_config(config)
     # # Load the checkpoint
-    checkpoint_path = "student_epoch_1_2.0495.pt"
-    checkpoint = torch.load(checkpoint_path)
-    # print("Created model in cpu for gpu", gpu_id)
-    print(checkpoint.keys())
-    raise Exception("stop")
+    # checkpoint_path = "student_epoch_1_2.0495.pt"
+    # checkpoint = torch.load(checkpoint_path)
+    # # print("Created model in cpu for gpu", gpu_id)
+    # print(type(model))
 
     # # Load the state dict into the model
-    model.load_state_dict(checkpoint, strict=True)  # Load the student weights
+    # model.load_state_dict(checkpoint, strict=True)  # Load the student weights
     # print("Checkpoint loaded for gpu", gpu_id)
     # torch.cuda.empty_cache()
     # gc.collect()
@@ -66,7 +66,7 @@ def evaluate_on_gpu(gpu_id: int, problems: List[Dict], output_file: str):
     # torch.cuda.empty_cache()
     # print(f"gpu {gpu_id} cache cleaned")
     
-    tokenizer = AutoTokenizer.from_pretrained("codeparrot/codeparrot-small")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -178,8 +178,6 @@ def main():
     # Create and start processes
     processes = []
     for gpu_id, problem_chunk in zip(gpu_ids, problem_chunks):
-        if gpu_id != 0:
-            continue
         p = mp.Process(
             target=evaluate_on_gpu, args=(gpu_id, problem_chunk, args.output_file)
         )

@@ -14,15 +14,14 @@ def indent_completion(completion: str) -> str:
     """Indent the completion so it fits as the body of the function."""
     return "\n".join("    " + line if line else "" for line in completion.splitlines())
 
-def cut_string_at_newline(string):
-    # Search for the first occurrence of "\n" followed by any non-space character
-    match = re.search(r'\n(?=\S)', string)
+def cut_string_at_first_function_end(input_string):
+    # Match up to the first newline followed by a non-space or non-newline character
+    match = re.search(r'\n[^\s\n]', input_string)
     if match:
-        # Slice the string up to and including the newline
-        return string[:match.start() + 1]
-    else:
-        # Return the original string if no match is found
-        return string
+        # Cut the string up to the match start
+        return input_string[:match.start()]
+    return input_string  # If no match, return the original string
+
 
 def unsafe_execute(problem, completion, timeout, result):
     with create_tempdir():
@@ -48,7 +47,7 @@ def unsafe_execute(problem, completion, timeout, result):
         # )
         check_program = (
             problem["prompt"] + "    "
-            + cut_string_at_newline(completion)
+            + cut_string_at_first_function_end(completion)
             + "\n"
             + problem["test"]
             + "\n"
