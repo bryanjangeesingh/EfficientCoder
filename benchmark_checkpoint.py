@@ -9,6 +9,7 @@ import sys
 import numpy as np
 from typing import List, Dict
 from safetensors.torch import load_file
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 sys.path.append("/home/brytech/human-eval/human_eval")
 from data import write_jsonl, read_problems
@@ -67,12 +68,23 @@ def evaluate_model(problems: List[Dict], base_model_path: str, checkpoint_path: 
         trust_remote_code=True
     )
 
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    model = get_peft_model(model, lora_config)
+
     # Load PEFT weights if provided and use_peft is True
     if checkpoint_path and use_peft:
         if checkpoint_path.endswith(".safetensors"):
             logger.info(f"Loading PEFT weights from safetensors file {checkpoint_path}")
             state_dict = load_file(checkpoint_path, device=device)
             model.load_state_dict(state_dict, strict=False)
+            model.print_trainable_parameters()
         else:
             logger.info(f"Loading PEFT weights from PyTorch file {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location=device)
