@@ -10,28 +10,41 @@ from transformers import DataCollatorWithPadding
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 
-def load_model_and_tokenizer(student_model_name, checkpoint_path=None):
-    # Load base model
+def load_models_and_tokenizers(student_model_name, teacher_model_name, checkpoint_path=None):
+    # Load student model
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
         torch_dtype=torch.float16,
         device_map="auto",
         cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
     )
-
-    # Prepare model for k-bit training
     student = prepare_model_for_kbit_training(student)
 
-    # Load tokenizer
+    # Load teacher model
+    teacher = AutoModelForCausalLM.from_pretrained(
+        teacher_model_name,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
+    )
+
+    # Load tokenizers
     student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
+
     if student_tokenizer.pad_token is None:
         student_tokenizer.pad_token = student_tokenizer.eos_token
+    if teacher_tokenizer.pad_token is None:
+        teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
 
+    # Load checkpoint for student if provided
     if checkpoint_path is not None:
         from peft import PeftModel
         student = PeftModel.from_pretrained(student, checkpoint_path)
+        # do a logger here saying that it loaded the peft model 
+        print(f"Loaded PEFT checkpoint from {checkpoint_path}")
+
     else:
-        # Configure LoRA
         lora_config = LoraConfig(
             r=8,
             lora_alpha=32,
@@ -49,26 +62,15 @@ def load_model_and_tokenizer(student_model_name, checkpoint_path=None):
         else:
             param.requires_grad = False
 
-    return student, student_tokenizer
+    return student, teacher, student_tokenizer, teacher_tokenizer
+
 
 def compute_probs(logits, temperature=1.0):
-    """
-    Compute the probabilities of the logits with optional temperature scaling.
-    """
     scaled_logits = logits / temperature
     return torch.softmax(scaled_logits, dim=-1)
 
-def pad_distributions(p, q):
-    '''
-    Pad the smaller distribution to match the size of the larger distribution.
-    Args:
-    p: Tensor of shape (batch_size, num_classes_p)
-    q: Tensor of shape (batch_size, num_classes_q)
 
-    ```
-    Returns:
-        p_padded, q_padded: Padded tensors of shape (batch_size, max(num_classes_p, num_classes_q))
-    '''
+def pad_distributions(p, q):
     max_len = max(p.shape[-1], q.shape[-1])
     if p.shape[-1] < max_len:
         p = torch.nn.functional.pad(p, (0, max_len - p.shape[-1]), value=0.0)
@@ -76,63 +78,55 @@ def pad_distributions(p, q):
         q = torch.nn.functional.pad(q, (0, max_len - q.shape[-1]), value=0.0)
     return p, q
 
+def truncate_output_sequences(teacher_output, student_output):
+    # teacher_output has shape [batch_size, seq_len, vocab_size]
+    # truncate the output sequence which is dim=1 to the minimum of either teacher or student length
+    min_length = min(teacher_output.shape[1], student_output.shape[1])
+    teacher_output = teacher_output[:, :min_length, :]
+    student_output = student_output[:, :min_length, :]
+    return teacher_output, student_output
+    
 
 def compute_wasserstein_distance(p, q):
-    '''
-    Compute the Wasserstein distance between two distributions
-    Args:
-    p: Tensor of shape (batch_size, num_classes)
-    q: Tensor of shape (batch_size, num_classes)
+    # p looks like torch.Size([2, 255, 32016])
+    # q looks like torch.Size([2, 255, 32016])
 
-    ```
-    Returns:
-        wasserstein_distance: Scalar tensor (averaged across the batch)
-    '''
-    # # # Compute cumulative distributions
-    # cdf_p = torch.cumsum(p + 1e-12, dim=-1)
-    # cdf_q = torch.cumsum(q + 1e-12, dim=-1)
-
-    # Wasserstein distance is the sum of absolute differences of CDFs
     wasserstein_per_instance = torch.sum(torch.abs(p - q), dim=-1)
     return wasserstein_per_instance.mean()
 
-def cross_entropy_loss_index_based(y_true, logits, pad_token_id):
-    # Shift the target sequence by one
-    y_true = y_true[:, 1:]
-    logits = logits[:, :-1, :]
+
+# def cross_entropy_loss_index_based(y_true, logits, pad_token_id):
+#     # Shift the target sequence by one
+#     y_true = y_true[:, 1:]
+#     logits = logits[:, :-1, :]
     
-    # Flatten the tensors
-    logits = logits.reshape(-1, logits.size(-1))
-    y_true = y_true.reshape(-1)
+#     # Flatten the tensors
+#     logits = logits.reshape(-1, logits.size(-1))
+#     y_true = y_true.reshape(-1)
     
-    # Define the loss function
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
-    return loss_fn(logits, y_true)
+#     # Define the loss function
+#     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
+#     return loss_fn(logits, y_true)
+
 
 def compute_uld_loss(teacher_probs, student_probs, lambda_uld):
-    '''
-    Compute the Universal Logit Distillation loss
-    Args:
-    teacher_probs: Tensor of shape (batch_size, num_classes_teacher)
-    student_probs: Tensor of shape (batch_size, num_classes_student)
-    lambda_uld: Scalar weighting the Wasserstein term.
+    # teacher probs shape is [batch_size, seq_len, teacher_vocab_size]
+    # student probs shape is [batch_size, seq_len, student_vocab_size]
 
-    ```
-    Returns:
-        uld_loss: Scalar tensor
-    '''
-    # Pad distributions to the same size
-    teacher_probs, student_probs = pad_distributions(teacher_probs, student_probs)
+    # pad distributions to the same vocab length
+    student_probs, teacher_probs = pad_distributions(student_probs, teacher_probs)
+    # (Pdb) student_probs.shape
+    # torch.Size([2, 375, 32016])
+    # (Pdb) teacher_probs.shape
+    # torch.Size([2, 375, 32016])
+    # the two sequences now have the same vocab length
 
-    # Sort probabilities for Wasserstein distance
     teacher_probs_sorted = teacher_probs.sort(dim=-1, descending=True)[0]
     student_probs_sorted = student_probs.sort(dim=-1, descending=True)[0]
 
-    # Compute Wasserstein distance
     wasserstein_loss = compute_wasserstein_distance(teacher_probs_sorted, student_probs_sorted)
-
-    # Return the combined ULD loss (note: cross-entropy is computed separately in training loop)
     return lambda_uld * wasserstein_loss
+
 
 
 def compute_perplexity(model, dataloader, tokenizer, device):
@@ -171,41 +165,56 @@ def compute_perplexity(model, dataloader, tokenizer, device):
     return avg_loss, perplexity
 
 
-def train_model(model, train_dataloader, optimizer, num_epochs, save_dir, start_checkpoint=0):
+def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_dir, student_tokenizer, lambda_uld, temperature):
     os.makedirs(save_dir, exist_ok=True)
-    
+
     for epoch in range(num_epochs):
-        model.train()
+        student.train()
+        teacher.eval()
         total_loss = 0
-        
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {start_checkpoint + epoch + 1}")
-        
+
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
+
         for batch in progress_bar:
-            input_ids = batch['student_input_ids'].to(model.device)
-            attention_mask = batch['student_attention_mask'].to(model.device)
-            labels = batch['labels'].to(model.device)
+            input_ids = batch['student_input_ids'].to(student.device)
+            student_attention_mask = batch['student_attention_mask'].to(student.device)
+            labels = batch['labels'].to(student.device)
+            teacher_inputs = batch['teacher_input_ids'].to(teacher.device)
+            teacher_attention_mask = batch['teacher_attention_mask'].to(teacher.device)
+
+            with torch.no_grad():
+                teacher_outputs = teacher(input_ids=teacher_inputs, attention_mask=teacher_attention_mask)
+
+            student_outputs = student(input_ids=input_ids, attention_mask=student_attention_mask, labels=labels)
+
+            teacher_probs = compute_probs(teacher_outputs.logits, temperature)
+            # shape is [seq_len, vocab_size]
+            student_probs = compute_probs(student_outputs.logits, temperature)
+
+            student_probs, teacher_probs = truncate_output_sequences(teacher_probs, student_probs)
+            # (Pdb) student_probs.shape
+            # torch.Size([2, 151, 32001])
+            # (Pdb) teacher_probs.shape
+            # torch.Size([2, 151, 32016])
+            # the outputs now have the same sequence length
+
+            cross_entropy_loss = student_outputs.loss
             
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-            
-            loss = outputs.loss
-            total_loss += loss.item()
-            
-            loss.backward()
+            uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
+
+            total_loss_batch = cross_entropy_loss + uld_loss
+
+            total_loss_batch.backward()
             optimizer.step()
             optimizer.zero_grad()
-            
-            progress_bar.set_postfix({'loss': loss.item()})
-        
+
+            total_loss += total_loss_batch.item()
+            progress_bar.set_postfix({'loss': total_loss_batch.item()})
+
         avg_loss = total_loss / len(train_dataloader)
-        print(f"Epoch {start_checkpoint + epoch + 1}: Average loss = {avg_loss:.4f}")
-        
-        # Save checkpoint
-        checkpoint_number = start_checkpoint + epoch + 1
-        model.save_pretrained(os.path.join(save_dir, f"checkpoint-{checkpoint_number}"))
+        print(f"Epoch {epoch + 1}: Average loss = {avg_loss:.4f}")
+
+        student.save_pretrained(os.path.join(save_dir, f"checkpoint-{epoch + 1}"))
 
 class CodeSearchNetDataset(Dataset):
     def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
@@ -246,8 +255,9 @@ class CodeSearchNetDataset(Dataset):
         row = self.data.iloc[idx]
         code = row.get("code", None)
 
-        student_instructions = f"# Complete the following Python function: {code}\n\n"
-        teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{code}\n\n### Response:"
+        student_instructions = f"# Complete the following Python function:\n{code}"
+        # teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{code}\n\n### Response:"
+        teacher_instructions = f"# Complete the following Python function:\n{code}"
 
         try:
             # Tokenize instructions for student and teacher with attention masks
@@ -318,34 +328,28 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-     # Load model and tokenizer
-    student, student_tokenizer = load_model_and_tokenizer(args.student_name, args.checkpoint_path)
-    print("Trainable parameters:", student.print_trainable_parameters())
+    student, teacher, student_tokenizer, teacher_tokenizer = load_models_and_tokenizers(
+        args.student_name, args.teacher_name, args.checkpoint_path)
 
-    # Prepare dataset and dataloader
     train_dataset = CodeSearchNetDataset(
         path=args.train_dataset_path,
         student_tokenizer=student_tokenizer,
-        teacher_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
         max_length=1024
     )
 
     def collate_fn(batch):
-        # Filter out None items
         batch = [item for item in batch if item is not None]
         if len(batch) == 0:
             return None
 
-        # Extract input features
         student_features = [{"input_ids": item["student_input_ids"]} for item in batch]
         teacher_features = [{"input_ids": item["teacher_input_ids"]} for item in batch]
         labels = [item["labels"] for item in batch]
 
-        # Use data collators for dynamic padding (input_ids + attention_mask)
         student_batch = train_dataset.student_data_collator(student_features)
         teacher_batch = train_dataset.teacher_data_collator(teacher_features)
 
-        # Dynamically pad labels to match the longest sequence
         max_input_length = student_batch["input_ids"].shape[1]
         padded_labels = [
             F.pad(
@@ -357,35 +361,26 @@ if __name__ == "__main__":
         ]
         labels = torch.stack(padded_labels)
 
-        # Return padded inputs and masks
         return {
             "student_input_ids": student_batch["input_ids"],
-            "student_attention_mask": student_batch["attention_mask"],  # Add attention mask
+            "student_attention_mask": student_batch["attention_mask"],
             "teacher_input_ids": teacher_batch["input_ids"],
-            "teacher_attention_mask": teacher_batch["attention_mask"],  # Add attention mask
+            "teacher_attention_mask": teacher_batch["attention_mask"],
             "labels": labels,
         }
 
-    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, drop_last=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
 
-    val_dataset = CodeSearchNetDataset(
-        path=args.val_dataset_path,  # Path to validation parquet file
-        student_tokenizer=student_tokenizer,
-        teacher_tokenizer=student_tokenizer,
-        max_length=1024
-    )
-
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn, drop_last=False)
-
-    # Initialize optimizer
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, eps=1e-4)
 
-    # Train the model
     train_model(
-        model=student,
-        train_dataloader=dataloader,
+        student=student,
+        teacher=teacher,
+        train_dataloader=train_dataloader,
         optimizer=optimizer,
         num_epochs=args.num_epochs,
         save_dir=args.save_dir,
-        start_checkpoint=args.start_checkpoint
+        student_tokenizer=student_tokenizer,
+        lambda_uld=args.lambda_uld,
+        temperature=args.temperature
     )
