@@ -7,23 +7,11 @@ import argparse
 import os
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import DataCollatorWithPadding
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-def load_model_and_tokenizer(student_model_name, teacher_model_name):
-    """
-    Load the student and teacher models and their respective tokenizers.
 
-    ```
-    Args:
-        student_model_name (str): Name or path of the student model.
-        teacher_model_name (str): Name or path of the teacher model.
-
-    Returns:
-        tuple: Contains the following elements:
-            - student (AutoModelForCausalLM): The loaded student model.
-            - teacher (AutoModelForCausalLM): The loaded teacher model.
-            - student_tokenizer (AutoTokenizer): Tokenizer for the student model.
-            - teacher_tokenizer (AutoTokenizer): Tokenizer for the teacher model.
-    """
+def load_model_and_tokenizer(student_model_name):
+    # Load base model
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
         torch_dtype=torch.float16,
@@ -31,28 +19,32 @@ def load_model_and_tokenizer(student_model_name, teacher_model_name):
         cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
     )
 
-    teacher = AutoModelForCausalLM.from_pretrained(
-        teacher_model_name,
-        torch_dtype=torch.float16,
-        device_map="auto",
-        cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
+    student = prepare_model_for_kbit_training(student)
+    
+    # Freeze the base model parameters
+    for param in student.parameters():
+        param.requires_grad = False
+
+    # Configure LoRA
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
     )
-
+    
+    # Apply LoRA and prepare for training
+    student = get_peft_model(student, lora_config)
+    # student.print_trainable_parameters()
+    
+    # Load tokenizer
     student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
-    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
-
-    # Handle the case where the tokenizers do not explicitly define pad tokens
     if student_tokenizer.pad_token is None:
         student_tokenizer.pad_token = student_tokenizer.eos_token
-    if teacher_tokenizer.pad_token is None:
-        teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
-
-    return (
-        student,
-        teacher,
-        student_tokenizer,
-        teacher_tokenizer
-    )
+        
+    return student, student_tokenizer
 
 def compute_probs(logits, temperature=1.0):
     """
@@ -175,90 +167,40 @@ def compute_perplexity(model, dataloader, tokenizer, device):
     return avg_loss, perplexity
 
 
-def train_model(student, teacher, student_tokenizer, teacher_tokenizer, dataloader, optimizer, num_epochs, save_dir, lambda_uld):
+def train_model(model, train_dataloader, optimizer, num_epochs, save_dir):
     os.makedirs(save_dir, exist_ok=True)
-
-    for epoch in tqdm(range(num_epochs), desc="Epochs"):
-        student.train()
-        teacher.eval()
-
-        epoch_ce_loss = 0.0  # Cross-Entropy loss accumulator
-        epoch_uld_loss = 0.0  # ULD loss accumulator
-        epoch_total_loss = 0.0  # Total loss accumulator
-
-        # Batch-wise progress bar
-        batch_progress = tqdm(enumerate(dataloader), desc=f"Epoch {epoch+1}", leave=False, total=len(dataloader))
-
-        for idx, batch in batch_progress:
-            student_inputs = batch["student_input_ids"].to(student.device)
-            student_attention_mask = batch["student_attention_mask"].to(student.device)  # Move attention mask
-            teacher_inputs = batch["teacher_input_ids"].to(teacher.device)
-            teacher_attention_mask = batch["teacher_attention_mask"].to(teacher.device)
-            labels = batch["labels"].to(student.device)
-
-            # Forward pass with attention mask
-            student_output = student(input_ids=student_inputs, attention_mask=student_attention_mask)
-
-            # Compute probabilities
-            # teacher_probs = compute_probs(teacher_output.logits)
-            student_probs = compute_probs(student_output.logits)
-
-            # Compute Cross-Entropy Loss
-            ce_loss = cross_entropy_loss_index_based(
-                labels, student_output.logits, pad_token_id=student_tokenizer.pad_token_id
+    
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
+        
+        for batch in progress_bar:
+            input_ids = batch['student_input_ids'].to(model.device)
+            attention_mask = batch['student_attention_mask'].to(model.device)
+            labels = batch['labels'].to(model.device)
+            
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
             )
-
-            # Compute ULD Loss
-            # uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
-
-            # Total Loss
-            loss = ce_loss # + uld_loss
-
-            # Check for NaN Loss
-            if torch.isnan(loss):
-                tqdm.write(f"Skipping Batch {idx} due to NaN loss.")
-                continue
-
-            # Backpropagation
-            optimizer.zero_grad()
+            
+            loss = outputs.loss
+            total_loss += loss.item()
+            
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)  # Gradient Clipping
             optimizer.step()
-
-            # Update epoch accumulators
-            epoch_ce_loss += ce_loss.item()
-            # epoch_uld_loss += uld_loss.item()
-            epoch_total_loss += loss.item()
-
-            # Update tqdm progress bar
-            batch_progress.set_postfix({
-                "CE Loss": f"{ce_loss.item():.4f}",
-                # "ULD Loss": f"{uld_loss.item():.4f}",
-                "Total Loss": f"{loss.item():.4f}"
-            })
-
-        # Calculate averages
-        avg_ce_loss = epoch_ce_loss / len(dataloader)
-        # avg_uld_loss = epoch_uld_loss / len(dataloader)
-        avg_total_loss = epoch_total_loss / len(dataloader)
-
-        # Log epoch-level averages
-        tqdm.write(f"Epoch {epoch+1} completed. Avg CE Loss: {avg_ce_loss:.4f}, Avg Total Loss: {avg_total_loss:.4f}")
-
-        # Validation step
-        avg_val_loss, perplexity = compute_perplexity(student, val_loader, student_tokenizer, student.device)
-        tqdm.write(f"Validation Results - Epoch {epoch+1}: Perplexity: {perplexity:.4f}, Avg Val Loss: {avg_val_loss:.4f}")
-
-        # save on the 30th epoch
-        if epoch == 29:
-            torch.save(student.state_dict(), os.path.join(save_dir, f"student_epoch_{epoch+1}_{perplexity:.4f}.pt"))
-            torch.save(optimizer.state_dict(), os.path.join(save_dir, f"optimizer_epoch_{epoch+1}_{perplexity:.4f}.pt"))
-
-        # Save weights after each epoch
-        if epoch % 5 == 0:
-            torch.save(student.state_dict(), os.path.join(save_dir, f"student_epoch_{epoch+1}_{perplexity:.4f}.pt"))
-            torch.save(optimizer.state_dict(), os.path.join(save_dir, f"optimizer_epoch_{epoch+1}_{perplexity:.4f}.pt"))
-
+            optimizer.zero_grad()
+            
+            progress_bar.set_postfix({'loss': loss.item()})
+        
+        avg_loss = total_loss / len(train_dataloader)
+        print(f"Epoch {epoch + 1}: Average loss = {avg_loss:.4f}")
+        
+        # Save checkpoint
+        model.save_pretrained(os.path.join(save_dir, f"checkpoint-{epoch + 1}"))
 
 class CodeSearchNetDataset(Dataset):
     def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
@@ -297,7 +239,7 @@ class CodeSearchNetDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        code = row.get("code", None)
+        code = row.get("for_overfitting", None)
 
         student_instructions = f"# Complete the following Python function: {code}\\n\\n"
         teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\\n\\n### Instruction:\\n{code}\\n\\n### Response:"
@@ -320,7 +262,7 @@ class CodeSearchNetDataset(Dataset):
                 return_tensors=None
             )
 
-            # snippet = row.get("code", None)
+            # snippet = row.get("for_overfitting", None)
             # if snippet is None or snippet.strip() == "":
             #     return None
 
@@ -371,17 +313,15 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # Load models and tokenizers
-    student, teacher, student_tokenizer, teacher_tokenizer = load_model_and_tokenizer(
-        student_model_name=args.student_name,
-        teacher_model_name=args.teacher_name
-    )
+    # Load model and tokenizer
+    student, student_tokenizer = load_model_and_tokenizer(args.student_name)
+    print("Trainable parameters:", student.print_trainable_parameters())
 
     # Prepare dataset and dataloader
     train_dataset = CodeSearchNetDataset(
         path=args.train_dataset_path,
         student_tokenizer=student_tokenizer,
-        teacher_tokenizer=teacher_tokenizer,
+        teacher_tokenizer=student_tokenizer,
         max_length=1024
     )
 
@@ -422,30 +362,26 @@ if __name__ == "__main__":
         }
 
                                                                                     # TODO: change this
-    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn, drop_last=True)
+    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, drop_last=True)
 
     val_dataset = CodeSearchNetDataset(
         path=args.val_dataset_path,  # Path to validation parquet file
         student_tokenizer=student_tokenizer,
-        teacher_tokenizer=teacher_tokenizer,
+        teacher_tokenizer=student_tokenizer,
         max_length=1024
     )
 
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn, drop_last=False)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn, drop_last=False)
 
     # Initialize optimizer
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, eps=1e-4)
 
     # Train the model
     train_model(
-        student=student,
-        teacher=teacher,
-        student_tokenizer=student_tokenizer,
-        teacher_tokenizer=teacher_tokenizer,
-        dataloader=dataloader,
+        model=student,
+        train_dataloader=dataloader,
         optimizer=optimizer,
         num_epochs=args.num_epochs,
-        save_dir=args.save_dir,
-        lambda_uld=args.lambda_uld
+        save_dir=args.save_dir
     )
 
