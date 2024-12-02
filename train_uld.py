@@ -10,7 +10,7 @@ from transformers import DataCollatorWithPadding
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 
-def load_model_and_tokenizer(student_model_name):
+def load_model_and_tokenizer(student_model_name, checkpoint_path=None):
     # Load base model
     student = AutoModelForCausalLM.from_pretrained(
         student_model_name,
@@ -19,31 +19,36 @@ def load_model_and_tokenizer(student_model_name):
         cache_dir="/nobackup/users/brytech/projects/condas/nlp_4gpus/weights"
     )
 
+    # Prepare model for k-bit training
     student = prepare_model_for_kbit_training(student)
-    
-    # Freeze the base model parameters
-    for param in student.parameters():
-        param.requires_grad = False
 
-    # Configure LoRA
-    lora_config = LoraConfig(
-        r=8,
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-    
-    # Apply LoRA and prepare for training
-    student = get_peft_model(student, lora_config)
-    # student.print_trainable_parameters()
-    
     # Load tokenizer
     student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
     if student_tokenizer.pad_token is None:
         student_tokenizer.pad_token = student_tokenizer.eos_token
-        
+
+    if checkpoint_path is not None:
+        from peft import PeftModel
+        student = PeftModel.from_pretrained(student, checkpoint_path)
+    else:
+        # Configure LoRA
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        student = get_peft_model(student, lora_config)
+
+    # Freeze base model parameters and ensure LoRA parameters require gradients
+    for name, param in student.named_parameters():
+        if 'lora' in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+
     return student, student_tokenizer
 
 def compute_probs(logits, temperature=1.0):
@@ -83,14 +88,13 @@ def compute_wasserstein_distance(p, q):
     Returns:
         wasserstein_distance: Scalar tensor (averaged across the batch)
     '''
-    # # Compute cumulative distributions
-    cdf_p = torch.cumsum(p + 1e-12, dim=-1)
-    cdf_q = torch.cumsum(q + 1e-12, dim=-1)
+    # # # Compute cumulative distributions
+    # cdf_p = torch.cumsum(p + 1e-12, dim=-1)
+    # cdf_q = torch.cumsum(q + 1e-12, dim=-1)
 
     # Wasserstein distance is the sum of absolute differences of CDFs
-    wasserstein_per_instance = torch.sum(torch.abs(cdf_p - cdf_q), dim=-1)
+    wasserstein_per_instance = torch.sum(torch.abs(p - q), dim=-1)
     return wasserstein_per_instance.mean()
-    # return 0
 
 def cross_entropy_loss_index_based(y_true, logits, pad_token_id):
     # Shift the target sequence by one
@@ -167,14 +171,14 @@ def compute_perplexity(model, dataloader, tokenizer, device):
     return avg_loss, perplexity
 
 
-def train_model(model, train_dataloader, optimizer, num_epochs, save_dir):
+def train_model(model, train_dataloader, optimizer, num_epochs, save_dir, start_checkpoint=0):
     os.makedirs(save_dir, exist_ok=True)
     
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
         
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {start_checkpoint + epoch + 1}")
         
         for batch in progress_bar:
             input_ids = batch['student_input_ids'].to(model.device)
@@ -197,10 +201,11 @@ def train_model(model, train_dataloader, optimizer, num_epochs, save_dir):
             progress_bar.set_postfix({'loss': loss.item()})
         
         avg_loss = total_loss / len(train_dataloader)
-        print(f"Epoch {epoch + 1}: Average loss = {avg_loss:.4f}")
+        print(f"Epoch {start_checkpoint + epoch + 1}: Average loss = {avg_loss:.4f}")
         
         # Save checkpoint
-        model.save_pretrained(os.path.join(save_dir, f"checkpoint-{epoch + 1}"))
+        checkpoint_number = start_checkpoint + epoch + 1
+        model.save_pretrained(os.path.join(save_dir, f"checkpoint-{checkpoint_number}"))
 
 class CodeSearchNetDataset(Dataset):
     def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
@@ -239,10 +244,10 @@ class CodeSearchNetDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        code = row.get("for_overfitting", None)
+        code = row.get("code", None)
 
-        student_instructions = f"# Complete the following Python function: {code}\\n\\n"
-        teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\\n\\n### Instruction:\\n{code}\\n\\n### Response:"
+        student_instructions = f"# Complete the following Python function: {code}\n\n"
+        teacher_instructions = f"Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{code}\n\n### Response:"
 
         try:
             # Tokenize instructions for student and teacher with attention masks
@@ -261,10 +266,6 @@ class CodeSearchNetDataset(Dataset):
                 padding=False,
                 return_tensors=None
             )
-
-            # snippet = row.get("for_overfitting", None)
-            # if snippet is None or snippet.strip() == "":
-            #     return None
 
             # Tokenize labels
             labels = self.student_tokenizer(
@@ -307,14 +308,18 @@ def parse_args():
     parser.add_argument("--train_dataset_path", type=str, required=True, help="Path to the training dataset (parquet file).")
     parser.add_argument("--val_dataset_path", type=str, required=True, help="Path to the validation dataset (parquet file).")
 
+    # Checkpoint loading and saving
+    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to the folder containing the previous checkpoint to load.")
+    parser.add_argument("--start_checkpoint", type=int, default=0, help="Starting checkpoint number for saving new checkpoints.")
+
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
 
-    # Load model and tokenizer
-    student, student_tokenizer = load_model_and_tokenizer(args.student_name)
+     # Load model and tokenizer
+    student, student_tokenizer = load_model_and_tokenizer(args.student_name, args.checkpoint_path)
     print("Trainable parameters:", student.print_trainable_parameters())
 
     # Prepare dataset and dataloader
@@ -361,7 +366,6 @@ if __name__ == "__main__":
             "labels": labels,
         }
 
-                                                                                    # TODO: change this
     dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, drop_last=True)
 
     val_dataset = CodeSearchNetDataset(
@@ -382,6 +386,6 @@ if __name__ == "__main__":
         train_dataloader=dataloader,
         optimizer=optimizer,
         num_epochs=args.num_epochs,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        start_checkpoint=args.start_checkpoint
     )
-

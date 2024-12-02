@@ -9,9 +9,11 @@ BATCH_SIZE=4                  # Batch size
 NUM_EPOCHS=30                    # Number of epochs
 LEARNING_RATE=1e-5               # Learning rate
 LOAD_IN_4BIT="--load_in_4bit"    # Whether to use 4-bit precision
-TRAIN_DATASET_PATH="/nobackup/users/brytech/datasets/humaneval/train_humaneval.parquet"
+TRAIN_DATASET_PATH="/nobackup/users/brytech/promptified_codesearchnet/train7500.parquet"
 VAL_DATASET_PATH="/nobackup/users/brytech/promptified_codesearchnet/test100.parquet"
 SAVE_DIR="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights/codellama_lora"    # Directory to save model weights
+CHECKPOINT_PATH="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights/codellama_lora/trained_on_7500/checkpoint-4"
+START_CHECKPOINT="4"
 
 # Ensure the output directory exists
 mkdir -p $SAVE_DIR
@@ -28,4 +30,6 @@ python train_uld.py \
     $LOAD_IN_4BIT \
     --train_dataset_path "$TRAIN_DATASET_PATH" \
     --val_dataset_path "$VAL_DATASET_PATH" \
-    --save_dir "$SAVE_DIR"
+    --save_dir "$SAVE_DIR" \
+    --start_checkpoint "$START_CHECKPOINT" \
+    --checkpoint_path "$CHECKPOINT_PATH"
