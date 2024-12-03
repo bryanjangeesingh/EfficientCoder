@@ -11,7 +11,7 @@ LEARNING_RATE=1e-5               # Learning rate
 LOAD_IN_4BIT="--load_in_4bit"    # Whether to use 4-bit precision
 TRAIN_DATASET_PATH="/nobackup/users/brytech/promptified_codesearchnet/train7500.parquet"
 VAL_DATASET_PATH="/nobackup/users/brytech/promptified_codesearchnet/test100.parquet"
-SAVE_DIR="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights/codellama_uld_lora"    # Directory to save model weights
+SAVE_DIR="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights/codellama_lora_and_uld"    # Directory to save model weights
 CHECKPOINT_PATH="/nobackup/users/brytech/train_uld_run_codesearchnet/output_weights/codellama_lora/checkpoint-7"
 START_CHECKPOINT="7"
 

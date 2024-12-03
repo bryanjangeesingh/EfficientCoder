@@ -78,55 +78,28 @@ def pad_distributions(p, q):
         q = torch.nn.functional.pad(q, (0, max_len - q.shape[-1]), value=0.0)
     return p, q
 
-def truncate_output_sequences(teacher_output, student_output):
-    # teacher_output has shape [batch_size, seq_len, vocab_size]
-    # truncate the output sequence which is dim=1 to the minimum of either teacher or student length
-    min_length = min(teacher_output.shape[1], student_output.shape[1])
-    teacher_output = teacher_output[:, :min_length, :]
-    student_output = student_output[:, :min_length, :]
-    return teacher_output, student_output
-    
+def compute_uld_loss(teacher_output, student_output, min_output_lengths, lambda_uld):
+    # teacher_output.shape is torch.Size([2, 224, 32001]) 
+    # student_output.shape is torch.Size([2, 224, 32016])
+    # min_output_lengths is length 2 and [180, 224] 
+    distillation_loss = torch.zeros(student_output.size(0), device=student.device)
+    for i in range(student_output.size(0)): 
+        # truncate to the minimum output length
+        student_truncated = student_output[i][:min_output_lengths[i], :]
+        teacher_truncated = teacher_output[i][:min_output_lengths[i], :]
+        
+        # pad the vocabulary dimension 
+        student_padded, teacher_padded = pad_distributions(student_truncated, teacher_truncated)
+        
+        # sort in descending order of the vocabulary dimension
+        teacher_probs_sorted = teacher_padded.sort(dim=-1, descending=True)[0] # torch.Size([62, 32016])
+        student_probs_sorted = student_padded.sort(dim=-1, descending=True)[0] # torch.Size([62, 32016])
 
-def compute_wasserstein_distance(p, q):
-    # p looks like torch.Size([2, 255, 32016])
-    # q looks like torch.Size([2, 255, 32016])
+        distillation_loss[i] = torch.abs(teacher_probs_sorted - student_probs_sorted).sum(-1).mean(-1) 
 
-    wasserstein_per_instance = torch.sum(torch.abs(p - q), dim=-1)
-    return wasserstein_per_instance.mean()
+    distillation_loss = distillation_loss.mean()
 
-
-# def cross_entropy_loss_index_based(y_true, logits, pad_token_id):
-#     # Shift the target sequence by one
-#     y_true = y_true[:, 1:]
-#     logits = logits[:, :-1, :]
-    
-#     # Flatten the tensors
-#     logits = logits.reshape(-1, logits.size(-1))
-#     y_true = y_true.reshape(-1)
-    
-#     # Define the loss function
-#     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
-#     return loss_fn(logits, y_true)
-
-
-def compute_uld_loss(teacher_probs, student_probs, lambda_uld):
-    # teacher probs shape is [batch_size, seq_len, teacher_vocab_size]
-    # student probs shape is [batch_size, seq_len, student_vocab_size]
-
-    # pad distributions to the same vocab length
-    student_probs, teacher_probs = pad_distributions(student_probs, teacher_probs)
-    # (Pdb) student_probs.shape
-    # torch.Size([2, 375, 32016])
-    # (Pdb) teacher_probs.shape
-    # torch.Size([2, 375, 32016])
-    # the two sequences now have the same vocab length
-
-    teacher_probs_sorted = teacher_probs.sort(dim=-1, descending=True)[0]
-    student_probs_sorted = student_probs.sort(dim=-1, descending=True)[0]
-
-    wasserstein_loss = compute_wasserstein_distance(teacher_probs_sorted, student_probs_sorted)
-    return lambda_uld * wasserstein_loss
-
+    return lambda_uld * distillation_loss
 
 
 def compute_perplexity(model, dataloader, tokenizer, device):
@@ -164,8 +137,58 @@ def compute_perplexity(model, dataloader, tokenizer, device):
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
     return avg_loss, perplexity
 
+# def truncate_output_sequences(teacher_output, student_output):
+#     # teacher_output has shape [batch_size, seq_len, vocab_size]
+#     # truncate the output sequence which is dim=1 to the minimum of either teacher or student length
+#     min_length = min(teacher_output.shape[1], student_output.shape[1])
+#     teacher_output = teacher_output[:, :min_length, :]
+#     student_output = student_output[:, :min_length, :]
+#     return teacher_output, student_output
+    
 
-def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_dir, student_tokenizer, lambda_uld, temperature):
+# def compute_wasserstein_distance(p, q):
+#     # p looks like torch.Size([2, 255, 32016])
+#     # q looks like torch.Size([2, 255, 32016])
+
+#     wasserstein_per_instance = torch.sum(torch.abs(p - q), dim=-1)
+#     return wasserstein_per_instance.mean()
+
+
+# def cross_entropy_loss_index_based(y_true, logits, pad_token_id):
+#     # Shift the target sequence by one
+#     y_true = y_true[:, 1:]
+#     logits = logits[:, :-1, :]
+    
+#     # Flatten the tensors
+#     logits = logits.reshape(-1, logits.size(-1))
+#     y_true = y_true.reshape(-1)
+    
+#     # Define the loss function
+#     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
+#     return loss_fn(logits, y_true)
+
+
+# def compute_uld_loss(teacher_probs, student_probs, lambda_uld):
+#     # teacher probs shape is [batch_size, seq_len, teacher_vocab_size]
+#     # student probs shape is [batch_size, seq_len, student_vocab_size]
+
+#     # pad distributions to the same vocab length
+#     student_probs, teacher_probs = pad_distributions(student_probs, teacher_probs)
+#     # (Pdb) student_probs.shape
+#     # torch.Size([2, 375, 32016])
+#     # (Pdb) teacher_probs.shape
+#     # torch.Size([2, 375, 32016])
+#     # the two sequences now have the same vocab length
+
+#     teacher_probs_sorted = teacher_probs.sort(dim=-1, descending=True)[0]
+#     student_probs_sorted = student_probs.sort(dim=-1, descending=True)[0]
+
+#     wasserstein_loss = compute_wasserstein_distance(teacher_probs_sorted, student_probs_sorted)
+#     return lambda_uld * wasserstein_loss
+
+
+
+def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_dir, student_tokenizer, lambda_uld, temperature, start_checkpoint=0):
     os.makedirs(save_dir, exist_ok=True)
 
     for epoch in range(num_epochs):
@@ -181,6 +204,7 @@ def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_
             labels = batch['labels'].to(student.device)
             teacher_inputs = batch['teacher_input_ids'].to(teacher.device)
             teacher_attention_mask = batch['teacher_attention_mask'].to(teacher.device)
+            min_output_lengths = batch['min_output_lengths']
 
             with torch.no_grad():
                 teacher_outputs = teacher(input_ids=teacher_inputs, attention_mask=teacher_attention_mask)
@@ -188,10 +212,10 @@ def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_
             student_outputs = student(input_ids=input_ids, attention_mask=student_attention_mask, labels=labels)
 
             teacher_probs = compute_probs(teacher_outputs.logits, temperature)
-            # shape is [seq_len, vocab_size]
             student_probs = compute_probs(student_outputs.logits, temperature)
 
-            student_probs, teacher_probs = truncate_output_sequences(teacher_probs, student_probs)
+            uld_loss = compute_uld_loss(teacher_probs, student_probs, min_output_lengths, lambda_uld)
+
             # (Pdb) student_probs.shape
             # torch.Size([2, 151, 32001])
             # (Pdb) teacher_probs.shape
@@ -200,8 +224,6 @@ def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_
 
             cross_entropy_loss = student_outputs.loss
             
-            uld_loss = compute_uld_loss(teacher_probs, student_probs, lambda_uld)
-
             total_loss_batch = cross_entropy_loss + uld_loss
 
             total_loss_batch.backward()
@@ -214,7 +236,8 @@ def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_
         avg_loss = total_loss / len(train_dataloader)
         print(f"Epoch {epoch + 1}: Average loss = {avg_loss:.4f}")
 
-        student.save_pretrained(os.path.join(save_dir, f"checkpoint-{epoch + 1}"))
+        student.save_pretrained(os.path.join(save_dir, f"checkpoint-{start_checkpoint +epoch + 1}"))
+
 
 class CodeSearchNetDataset(Dataset):
     def __init__(self, path, student_tokenizer, teacher_tokenizer, max_length):
@@ -296,6 +319,7 @@ class CodeSearchNetDataset(Dataset):
         except Exception as e:
             return None
         
+        
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a student model with ULD.")
 
@@ -325,6 +349,7 @@ def parse_args():
     return parser.parse_args()
 
 
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -343,13 +368,20 @@ if __name__ == "__main__":
         if len(batch) == 0:
             return None
 
+        # Store original lengths for both student and teacher input_ids
+        student_lengths = [len(item["student_input_ids"]) for item in batch]
+        teacher_lengths = [len(item["teacher_input_ids"]) for item in batch]
+        min_output_lengths = [min(x,y) for x,y in zip(student_lengths, teacher_lengths)]
+        # Prepare features and labels
         student_features = [{"input_ids": item["student_input_ids"]} for item in batch]
         teacher_features = [{"input_ids": item["teacher_input_ids"]} for item in batch]
         labels = [item["labels"] for item in batch]
 
+        # Use the dataset's collators
         student_batch = train_dataset.student_data_collator(student_features)
         teacher_batch = train_dataset.teacher_data_collator(teacher_features)
 
+        # Calculate max input length and pad labels
         max_input_length = student_batch["input_ids"].shape[1]
         padded_labels = [
             F.pad(
@@ -361,12 +393,14 @@ if __name__ == "__main__":
         ]
         labels = torch.stack(padded_labels)
 
+        # Return the collated batch with original lengths included
         return {
             "student_input_ids": student_batch["input_ids"],
             "student_attention_mask": student_batch["attention_mask"],
             "teacher_input_ids": teacher_batch["input_ids"],
             "teacher_attention_mask": teacher_batch["attention_mask"],
             "labels": labels,
+            'min_output_lengths': min_output_lengths
         }
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
@@ -382,5 +416,6 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         student_tokenizer=student_tokenizer,
         lambda_uld=args.lambda_uld,
-        temperature=args.temperature
+        temperature=args.temperature, 
+        start_checkpoint=args.start_checkpoint
     )
