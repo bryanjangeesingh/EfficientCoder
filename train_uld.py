@@ -8,7 +8,7 @@ import os
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import DataCollatorWithPadding
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 def load_models_and_tokenizers(student_model_name, teacher_model_name, checkpoint_path=None):
     # Load student model
@@ -38,21 +38,36 @@ def load_models_and_tokenizers(student_model_name, teacher_model_name, checkpoin
         teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
 
     # Load checkpoint for student if provided
+    checkpoint_path = None
     if checkpoint_path is not None:
+        breakpoint()
         from peft import PeftModel
         student = PeftModel.from_pretrained(student, checkpoint_path)
         # do a logger here saying that it loaded the peft model 
         print(f"Loaded PEFT checkpoint from {checkpoint_path}")
 
     else:
+        # for codellama
+        # lora_config = LoraConfig(
+        #     r=8,
+        #     lora_alpha=32,
+        #     target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        #     lora_dropout=0.05,
+        #     bias="none",
+        #     task_type="CAUSAL_LM"
+        # )
+
+        # for codparrot 
         lora_config = LoraConfig(
             r=8,
             lora_alpha=32,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            target_modules=["c_attn", "c_proj"],
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM"
         )
+
+
         student = get_peft_model(student, lora_config)
 
     # Freeze base model parameters and ensure LoRA parameters require gradients
@@ -228,6 +243,7 @@ def train_model(student, teacher, train_dataloader, optimizer, num_epochs, save_
 
             total_loss_batch.backward()
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
 
             total_loss += total_loss_batch.item()
@@ -403,9 +419,10 @@ if __name__ == "__main__":
             'min_output_lengths': min_output_lengths
         }
 
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=4)
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, eps=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs * len(train_dataloader), eta_min=1e-6)
 
     train_model(
         student=student,
